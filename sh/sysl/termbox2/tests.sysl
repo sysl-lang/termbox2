@@ -1,0 +1,392 @@
+module sh.sysl.termbox2
+@tests
+
+import sysl.fs.{write_text, read_text, remove_file}
+import sysl.text.Search
+
+// What this binding claims, run by `sysl test .`.
+//
+// ==What is covered, and what a terminal would be needed for==
+//
+// **Nothing here draws on a screen, because a test suite has no terminal to draw on.** termbox asks
+// the terminal for its size with `ioctl`, and a descriptor that is not a terminal has none to give --
+// so `init` against an ordinary file leaves a screen of no width, on which every cell is out of
+// bounds. That is not a limitation of the tests so much as the honest state of a program with no
+// terminal, and the lifecycle tests below pin exactly that state rather than pretending otherwise.
+//
+// Covering `set_cell` and `present` for real would need a pseudo-terminal, which needs `openpt`,
+// `TIOCSWINSZ` and a `struct winsize` -- macros and a layout, so more C, and C in this package is C
+// every consumer compiles. It was judged not worth shipping test scaffolding to every program that
+// draws a menu. The README says the same thing where a reader will see it.
+//
+// ==What IS covered, and why each case was chosen==
+//
+// The failures a binding has are not the failures a library has. A shim that dropped an argument,
+// transcribed a constant that is right on one platform, or paired two switches wrongly still
+// compiles, still links, and still answers something. So:
+//
+//   - **The compile-time options.** `TB_OPT_ATTR_W`, `TB_OPT_EGC` and `TB_OPT_LIBC_WCHAR` are
+//     `#define`s, invisible to the linker, and each of them changes what the library *is*. A test is
+//     the only thing that can notice one did not arrive.
+//   - **Both directions of every table.** The key table is two switches over one correspondence, so
+//     every ordinal is round-tripped through both -- which catches a case that is missing,
+//     duplicated, or paired with the wrong constant. A key value otherwise only arrives from a
+//     terminal somebody is typing at, so nothing else here could see it.
+//   - **The error path across many entry points**, since that is the one path a program with no
+//     terminal can reach in full.
+//   - **What termbox actually wrote**, by pointing it at a file and reading the file back. That is
+//     the only assertion here about bytes leaving the process, and it is what proves `send`'s
+//     pointer and length crossed intact.
+
+// `TERM` is what termbox looks a terminal's capabilities up under, and `init` fails with `NoTerm`
+// when it is unset and `UnsupportedTerm` when it names something with neither a terminfo entry nor a
+// built-in one. Neither is a fact about this binding, and a suite that passed at a developer's
+// terminal and failed under a build runner would be reporting the runner.
+//
+// So the tests set it, to a name termbox carries built-in capabilities for. `setenv` is POSIX and
+// this package already requires POSIX; it is named here rather than in the binding because a library
+// has no business changing its consumer's environment.
+extern "setenv" c_setenv(name: *u8, value: *u8, overwrite: int) -> int
+
+private with_term() = c_setenv(c"TERM", c"xterm", 1)
+
+// Where the write-through test points termbox. Nothing else reads it, and every test that makes it
+// removes it.
+private scratch() -> string = "/tmp/sysl-termbox2-test.out"
+
+// A headless termbox, initialized against an ordinary file, which is the only kind of `init` a suite
+// can make. The file has to exist first, because `init_file` opens rather than creates.
+private headless()
+    with_term()
+    write_text(scratch(), "").expect("the scratch file can be created")
+    init_file(scratch()).expect("termbox initializes against a file")
+
+private done()
+    shutdown().expect("termbox shuts down")
+    remove_file(scratch()).expect("the scratch file can be removed")
+
+// -- The compile-time options ----------------------------------------------------------------------
+
+// **This is the `REG_EXTENDED` case of this package**: `TB_OPT_ATTR_W` is a `#define`, so nothing
+// about it is visible to the linker, and a header compiled at 16 bits while this side assumed 64
+// would compile cleanly and pass the wrong number of bytes for every colour.
+//
+// `tb_attr_width` reports what the header was actually compiled with, which is what makes the
+// mismatch findable at all. The second assertion is the same claim from the other end: `INVISIBLE`
+// only exists at 64 bits, and it does not fit in 32.
+@test
+the_attribute_width_the_header_was_built_with_is_the_one_this_side_assumes() =
+    assert_eq(attr_width(), 64)
+    assert(INVISIBLE > 0xffffffffu64, "a 64-bit-only attribute is above the 32-bit ones")
+    assert(has_truecolor(), "truecolor follows from an attribute width of at least 32")
+
+// The other two options, both deliberate and both stated in `termbox2.c`.
+//
+// `has_egc` being false is what makes `tb_set_cell_ex` and `tb_extend_cell` absent from this binding
+// rather than merely unbound -- a reader who goes looking for them should find this.
+@test
+grapheme_clusters_are_off_and_the_binding_says_so() =
+    assert(!has_egc(), "TB_OPT_EGC is not set, so a cell holds one codepoint")
+
+// **`TB_OPT_LIBC_WCHAR` is the option this catches, and it catches it by measuring a character.**
+// Unset -- as it is here -- termbox measures width with its own Unicode tables. Set, it would use
+// libc's `wcwidth(3)`, which answers -1 for every non-ASCII codepoint until the program has called
+// `setlocale(3)` with a UTF-8 locale, and no sysl program does. So a package built the other way
+// would lay CJK out one column wide and this assertion is what says it did not.
+@test
+a_codepoints_width_is_measured_in_columns_by_termboxs_own_tables() =
+    assert_eq(wcwidth(0x61u32), 1)          // 'a'
+    assert_eq(wcwidth(0x4e00u32), 2)        // the CJK ideograph for "one"
+    assert_eq(wcwidth(0x1f600u32), 2)       // a grinning face
+    assert_eq(wcwidth(0x0301u32), 0)        // a combining acute accent occupies nothing
+    assert_eq(wcwidth(0x07u32), -1)         // and a bell has no printed form at all
+
+@test
+a_codepoint_with_no_printed_form_is_not_printable() =
+    assert(is_printable(0x61u32), "a letter is printable")
+    assert(is_printable(0x4e00u32), "so is an ideograph")
+    assert(!is_printable(0x07u32), "a bell is not")
+    assert(!is_printable(0x00u32), "and neither is a NUL")
+
+// -- Colours and attributes ------------------------------------------------------------------------
+
+// Nothing here can check that `RED` is red -- that would need a terminal to be red on. What it can
+// check is the *shape* the two families have to have for a bitwise-or to mean anything, which is what
+// a shim returning one constant where another was meant would break.
+@test
+a_colour_and_a_style_occupy_different_bits() =
+    assert_eq(DEFAULT, 0u64)
+
+    val colours = [BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE]
+    val styles  = [BOLD, UNDERLINE, REVERSE, ITALIC, BLINK, HI_BLACK, BRIGHT, DIM,
+                   STRIKEOUT, UNDERLINE_2, OVERLINE, INVISIBLE]
+
+    for i in 0usize..<colours.len
+        assert(colours[i] != 0u64, "no colour is the default")
+
+        for j in 0usize..<colours.len
+            if i != j then assert(colours[i] != colours[j], "the eight colours are eight numbers")
+
+        for s in styles
+            assert(colours[i] < s, "every colour is below every style bit")
+            assert((colours[i] & s) == 0u64, "so or-ing the two loses neither")
+
+    for i in 0usize..<styles.len
+        assert((styles[i] & (styles[i] - 1u64)) == 0u64, "a style attribute is one bit")
+
+        for j in 0usize..<styles.len
+            if i != j then assert(styles[i] != styles[j], "and the twelve are twelve bits")
+
+// The one place a colour is built rather than read out of the header, so this is arithmetic of this
+// package's own and is testable outright.
+@test
+rgb_packs_the_channels_where_truecolor_reads_them() =
+    assert_eq(rgb(255u8, 0u8, 0u8), 0xff0000u64)
+    assert_eq(rgb(0u8, 255u8, 0u8), 0x00ff00u64)
+    assert_eq(rgb(0u8, 0u8, 255u8), 0x0000ffu64)
+    assert_eq(rgb(1u8, 2u8, 3u8), 0x010203u64)
+    assert_eq(rgb(0u8, 0u8, 0u8), DEFAULT)
+
+// -- The key table ---------------------------------------------------------------------------------
+
+// **Two switches over one correspondence, so every ordinal goes through both.**
+//
+// This is the only test that can see the key table at all: a key value otherwise arrives from a
+// terminal somebody is typing at, and there is none here. A case that is missing, duplicated, or
+// paired with the wrong constant fails one of the three assertions below -- and each of those is a
+// mistake that compiles, links, and quietly reports the wrong key for the rest of the package's life.
+//
+// The bound comes from the C rather than from a number written here, so adding a key cannot leave the
+// loop testing the old list.
+@test
+every_named_key_round_trips_through_both_switches() =
+    val n = c_key_count()
+
+    assert(n > 60, "the table names the keys a terminal has")
+
+    for o in 0..<n
+        val code = c_key_value(o)
+
+        assert(code >= 0, "every ordinal below the count names a key")
+        assert_eq(c_key_ordinal(code), o)
+
+        for p in 0..<o
+            assert(c_key_value(p) != code, "and no two ordinals name the same key")
+
+// A value no key has answers `UnknownKey` rather than landing on whichever case a fall-through would
+// have reached. `!` is an ordinary printable character, which arrives in `Event.ch` and never in
+// `Event.key`, so it is exactly the sort of number that must not be named.
+@test
+a_key_value_the_table_does_not_name_is_unknown() =
+    assert_eq(c_key_ordinal(0x21), c_key_count())
+    assert_eq(c_key_ordinal(0x1000), c_key_count())
+    assert(key_code(UnknownKey).is_none(), "and `UnknownKey` has no code to answer with")
+
+// The public inverse, on the two shapes of key: one from the ASCII range and one the terminal
+// synthesizes. Escape's code is shared with Ctrl-3 and Ctrl-[, which is why `Esc` is the name kept.
+@test
+key_code_answers_what_an_event_would_have_carried() =
+    val esc = key_code(Esc).expect("Escape has a code")
+    val up  = key_code(Up).expect("the up arrow has a code")
+
+    assert(esc < 0x80, "an ASCII key is the byte the terminal sent")
+    assert(up > 0xff, "and a terminal-dependent one is above every byte")
+    assert(esc != up, "which are not the same number")
+
+// -- Errors ------------------------------------------------------------------------------------------
+
+// **Every entry point before `init` answers `NotInit`, and nothing quietly does nothing.** This is
+// the widest sweep the suite can make: a dozen functions, each reached through its own `extern`, each
+// having to carry a negative number back and turn it into the same kind.
+//
+// `peek_event` is the interesting one -- it has two negative answers to tell apart, and a timeout is
+// not what happened here.
+@test
+every_call_before_init_says_the_library_is_not_initialized() =
+    assert_eq(width().unwrap_err().kind(), NotInit)
+    assert_eq(height().unwrap_err().kind(), NotInit)
+    assert_eq(clear().unwrap_err().kind(), NotInit)
+    assert_eq(present().unwrap_err().kind(), NotInit)
+    assert_eq(invalidate().unwrap_err().kind(), NotInit)
+    assert_eq(hide_cursor().unwrap_err().kind(), NotInit)
+    assert_eq(set_cursor(0, 0).unwrap_err().kind(), NotInit)
+    assert_eq(set_cell(0, 0, 0x61u32, DEFAULT, DEFAULT).unwrap_err().kind(), NotInit)
+    assert_eq(set_clear_attrs(RED, BLUE).unwrap_err().kind(), NotInit)
+    assert_eq(print_at(0, 0, DEFAULT, DEFAULT, "x").unwrap_err().kind(), NotInit)
+    assert_eq(send("x".bytes).unwrap_err().kind(), NotInit)
+    assert_eq(fds().unwrap_err().kind(), NotInit)
+    assert_eq(poll_event().unwrap_err().kind(), NotInit)
+    assert_eq(peek_event(0).unwrap_err().kind(), NotInit)
+    assert_eq(shutdown().unwrap_err().kind(), NotInit)
+
+// A failure that carries an `errno`, which is a different path through `Error` from the ones above:
+// the kind comes from termbox and the *message* comes from the C library's `strerror`.
+@test
+a_failure_that_carries_an_errno_reports_the_c_librarys_words() =
+    with_term()
+
+    val e = init_file("/no/such/terminal/anywhere").unwrap_err()
+
+    assert_eq(e.kind(), InitOpen)
+    assert(e.errno() != 0, "opening something that is not there set errno")
+    assert(e.message() != "", "and the message is the C library's sentence for it")
+
+// Two different failures give two different kinds and two different sentences. A binding that
+// answered one code for everything, or that read the message for a code other than the one it was
+// given, passes neither half.
+@test
+two_failures_are_two_answers() =
+    with_term()
+
+    val absent = init_file("/no/such/terminal/anywhere").unwrap_err()
+    val stopped = width().unwrap_err()
+
+    assert(absent.kind() != stopped.kind(), "a missing device is not an uninitialized library")
+    assert(absent.message() != stopped.message(), "and they do not read the same")
+    assert(absent.code != stopped.code, "because they are not the same code")
+
+// A code termbox has never issued still answers something, which is what keeps a program running
+// against a termbox newer than this binding.
+@test
+a_code_this_binding_has_not_heard_of_is_other_rather_than_a_trap() =
+    val made_up = Error(-9999)
+
+    assert_eq(made_up.kind(), UnknownError)
+    assert(made_up.message() != "", "and it still has words for it")
+
+// -- The lifecycle, with no terminal -----------------------------------------------------------------
+
+// **The honest state of a program with no terminal**, which is what a suite has. termbox initializes,
+// because a descriptor is all it needs to write to; it has no size, because a size comes from an
+// `ioctl` on a terminal and there is none; and so every cell is out of bounds.
+//
+// Pinning this is worth more than it looks: it is the whole of what distinguishes "termbox refused"
+// from "termbox is running and there is nowhere to draw", and a program run under a pipe hits it.
+@test
+init_against_a_file_succeeds_and_leaves_a_screen_with_no_size() =
+    headless()
+
+    assert_eq(width().unwrap_err().kind(), Failed)
+    assert_eq(height().unwrap_err().kind(), Failed)
+    assert_eq(set_cell(0, 0, 0x61u32, RED, DEFAULT).unwrap_err().kind(), OutOfBounds)
+    assert_eq(print_at(0, 0, RED, DEFAULT, "hello").unwrap_err().kind(), OutOfBounds)
+
+    assert(clear().is_ok(), "clearing a screen of no cells is not a failure")
+    assert(present().is_ok(), "and neither is presenting one")
+
+    done()
+
+@test
+a_second_init_is_refused_and_a_call_after_shutdown_is_too() =
+    headless()
+
+    assert_eq(init_file(scratch()).unwrap_err().kind(), InitAlready)
+
+    done()
+
+    assert_eq(present().unwrap_err().kind(), NotInit)
+
+// The two descriptors a program running its own event loop waits on. Nothing here can make either
+// readable; what it can check is that two came back rather than one value twice, which is the shape
+// of mistake an out-parameter pair invites.
+@test
+the_descriptors_to_wait_on_are_two_different_ones() =
+    headless()
+
+    val (tty, resize) = fds().expect("the descriptors are available once initialized")
+
+    assert(tty >= 0, "the terminal descriptor is open")
+    assert(resize >= 0, "so is the pipe the resize handler writes to")
+    assert(tty != resize, "and they are not the same one")
+
+    done()
+
+// **The one assertion here about bytes leaving the process.** `send` hands C a pointer and a length,
+// and a shim that dropped the length or passed the wrong pointer would still return `TB_OK`.
+//
+// The escape sequence is the second half: termbox writes one at `init` -- enter the alternate screen,
+// hide the cursor, clear -- so a file holding none would mean the capabilities never loaded, which is
+// the failure `NoTerm` exists for and which would otherwise pass silently as a screen nobody looked at.
+@test
+what_was_sent_is_on_the_far_end_of_the_descriptor() =
+    headless()
+
+    send("hello, terminal".bytes).expect("raw bytes are accepted")
+    present().expect("present flushes what is buffered")
+
+    // Read before removing, so `done` is not what ends this one.
+    shutdown().expect("termbox shuts down")
+
+    val written = read_text(scratch()).expect("the file can be read back")
+
+    remove_file(scratch()).expect("the scratch file can be removed")
+
+    assert(written.contains("hello, terminal"), "the bytes sent are the bytes written")
+    assert(written.contains("\u{1b}["), "and termbox wrote escape sequences of its own around them")
+
+// -- Modes -------------------------------------------------------------------------------------------
+
+// **Both directions of the output-mode table.** The ordinal crosses one way to choose a mode and the
+// other way to report it, so a pair of switches out of step answers the wrong mode -- which nothing
+// but a round trip can see, since a mode has no observable effect without a screen.
+@test
+an_output_mode_set_is_the_output_mode_reported() =
+    headless()
+
+    assert_eq(output_mode().expect("a mode is in effect"), Normal)
+
+    for m in [Color256, Color216, Grayscale, Truecolor, Normal]
+        set_output_mode(m).expect("the mode is accepted")
+        assert_eq(output_mode().expect("and is the one in effect afterwards"), m)
+
+    done()
+
+// `UnknownOutput` is what a number this binding does not recognize is *reported* as, and it is not
+// something anything can be put into. A shim answering `Normal` for an ordinal it did not know would
+// leave a caller who asked for nonsense believing they had got what they asked for.
+@test
+a_mode_that_is_not_one_is_refused_rather_than_rounded_to_normal() =
+    headless()
+
+    set_output_mode(Color216).expect("a real mode is accepted")
+
+    assert_eq(set_output_mode(UnknownOutput).unwrap_err().kind(), Failed)
+    assert_eq(output_mode().expect("and the refusal changed nothing"), Color216)
+
+    done()
+
+// **The input mode is a mask rather than an enumeration**, so this checks composition and
+// decomposition rather than a table: two independent bits, four combinations, each recovered.
+//
+// The `alt`/`esc` pair is the half a shim can get wrong invisibly -- termbox says asking for both
+// behaves as if only `esc` had been asked for, so a composition that or-ed them together would report
+// `alt = false` for a caller who asked for `alt = true`.
+@test
+an_input_mode_set_is_the_input_mode_reported() =
+    headless()
+
+    val start = input_mode().expect("a mode is in effect")
+
+    assert(!start.alt, "escape means the Escape key until told otherwise")
+    assert(!start.mouse, "and the mouse is not reported until asked for")
+
+    for wanted in [InputMode(true, false), InputMode(false, true), InputMode(true, true),
+                   InputMode(false, false)]
+        set_input_mode(wanted).expect("the mode is accepted")
+
+        val got = input_mode().expect("and is the one in effect afterwards")
+
+        assert_eq(got.alt, wanted.alt)
+        assert_eq(got.mouse, wanted.mouse)
+
+    done()
+
+// -- What termbox says about itself -------------------------------------------------------------------
+
+// A string out of static C storage, which is the simplest thing that can cross and is therefore worth
+// one assertion: a `*u8` that was never decoded would answer the fallback instead.
+@test
+the_version_is_termboxs_own() =
+    assert(version() != "", "termbox names its version")
+    assert(version() != "unknown", "and it is not this binding's fallback")
+    assert(version().contains("2."), "the vendored header is a termbox 2")
