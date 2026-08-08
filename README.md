@@ -27,12 +27,12 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.1.0" }
+  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.1.1" }
 }
 ```
 
 The coordinate is an identity rather than a URL, so it carries no `https://`, and `version` is the
-tag `v0.1.0` here.
+tag `v0.1.1` here.
 
 Or point at it directly, which needs no fetching and is what this repository's own tests do. Either a
 built artifact or the source tree works, and they are the same road:
@@ -86,7 +86,7 @@ main() -> Result[unit, Error]
             Keyboard ->
                 if ev.key == Esc || ev.ch == u32('q') then
                     going = false
-                elif ev.ch != 0u32 then
+                elif ev.ch != 0 then
                     said = f"you typed U+${ev.ch}%04X"
                 else
                     said = f"you pressed ${ev.key}"

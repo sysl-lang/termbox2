@@ -95,18 +95,18 @@ grapheme_clusters_are_off_and_the_binding_says_so() =
 // would lay CJK out one column wide and this assertion is what says it did not.
 @test
 a_codepoints_width_is_measured_in_columns_by_termboxs_own_tables() =
-    assert_eq(wcwidth(0x61u32), 1)          // 'a'
-    assert_eq(wcwidth(0x4e00u32), 2)        // the CJK ideograph for "one"
-    assert_eq(wcwidth(0x1f600u32), 2)       // a grinning face
-    assert_eq(wcwidth(0x0301u32), 0)        // a combining acute accent occupies nothing
-    assert_eq(wcwidth(0x07u32), -1)         // and a bell has no printed form at all
+    assert_eq(wcwidth(0x61), 1)          // 'a'
+    assert_eq(wcwidth(0x4e00), 2)        // the CJK ideograph for "one"
+    assert_eq(wcwidth(0x1f600), 2)       // a grinning face
+    assert_eq(wcwidth(0x0301), 0)        // a combining acute accent occupies nothing
+    assert_eq(wcwidth(0x07), -1)         // and a bell has no printed form at all
 
 @test
 a_codepoint_with_no_printed_form_is_not_printable() =
-    assert(is_printable(0x61u32), "a letter is printable")
-    assert(is_printable(0x4e00u32), "so is an ideograph")
-    assert(!is_printable(0x07u32), "a bell is not")
-    assert(!is_printable(0x00u32), "and neither is a NUL")
+    assert(is_printable(0x61), "a letter is printable")
+    assert(is_printable(0x4e00), "so is an ideograph")
+    assert(!is_printable(0x07), "a bell is not")
+    assert(!is_printable(0x00), "and neither is a NUL")
 
 // -- Colours and attributes ------------------------------------------------------------------------
 
@@ -115,37 +115,37 @@ a_codepoint_with_no_printed_form_is_not_printable() =
 // a shim returning one constant where another was meant would break.
 @test
 a_colour_and_a_style_occupy_different_bits() =
-    assert_eq(DEFAULT, 0u64)
+    assert_eq(DEFAULT, 0)
 
     val colours = [BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE]
     val styles  = [BOLD, UNDERLINE, REVERSE, ITALIC, BLINK, HI_BLACK, BRIGHT, DIM,
                    STRIKEOUT, UNDERLINE_2, OVERLINE, INVISIBLE]
 
-    for i in 0usize..<colours.len
-        assert(colours[i] != 0u64, "no colour is the default")
+    for i in 0..<colours.len
+        assert(colours[i] != 0, "no colour is the default")
 
-        for j in 0usize..<colours.len
+        for j in 0..<colours.len
             if i != j then assert(colours[i] != colours[j], "the eight colours are eight numbers")
 
         for s in styles
             assert(colours[i] < s, "every colour is below every style bit")
-            assert((colours[i] & s) == 0u64, "so or-ing the two loses neither")
+            assert((colours[i] & s) == 0, "so or-ing the two loses neither")
 
-    for i in 0usize..<styles.len
-        assert((styles[i] & (styles[i] - 1u64)) == 0u64, "a style attribute is one bit")
+    for i in 0..<styles.len
+        assert((styles[i] & (styles[i] - 1)) == 0, "a style attribute is one bit")
 
-        for j in 0usize..<styles.len
+        for j in 0..<styles.len
             if i != j then assert(styles[i] != styles[j], "and the twelve are twelve bits")
 
 // The one place a colour is built rather than read out of the header, so this is arithmetic of this
 // package's own and is testable outright.
 @test
 rgb_packs_the_channels_where_truecolor_reads_them() =
-    assert_eq(rgb(255u8, 0u8, 0u8), 0xff0000u64)
-    assert_eq(rgb(0u8, 255u8, 0u8), 0x00ff00u64)
-    assert_eq(rgb(0u8, 0u8, 255u8), 0x0000ffu64)
-    assert_eq(rgb(1u8, 2u8, 3u8), 0x010203u64)
-    assert_eq(rgb(0u8, 0u8, 0u8), DEFAULT)
+    assert_eq(rgb(255, 0, 0), 0xff0000)
+    assert_eq(rgb(0, 255, 0), 0x00ff00)
+    assert_eq(rgb(0, 0, 255), 0x0000ffu64)
+    assert_eq(rgb(1, 2, 3), 0x010203)
+    assert_eq(rgb(0, 0, 0), DEFAULT)
 
 // -- The key table ---------------------------------------------------------------------------------
 
@@ -210,7 +210,7 @@ every_call_before_init_says_the_library_is_not_initialized() =
     assert_eq(invalidate().unwrap_err().kind(), NotInit)
     assert_eq(hide_cursor().unwrap_err().kind(), NotInit)
     assert_eq(set_cursor(0, 0).unwrap_err().kind(), NotInit)
-    assert_eq(set_cell(0, 0, 0x61u32, DEFAULT, DEFAULT).unwrap_err().kind(), NotInit)
+    assert_eq(set_cell(0, 0, 0x61, DEFAULT, DEFAULT).unwrap_err().kind(), NotInit)
     assert_eq(set_clear_attrs(RED, BLUE).unwrap_err().kind(), NotInit)
     assert_eq(print_at(0, 0, DEFAULT, DEFAULT, "x").unwrap_err().kind(), NotInit)
     assert_eq(send("x".bytes).unwrap_err().kind(), NotInit)
@@ -268,7 +268,7 @@ init_against_a_file_succeeds_and_leaves_a_screen_with_no_size() =
 
     assert_eq(width().unwrap_err().kind(), Failed)
     assert_eq(height().unwrap_err().kind(), Failed)
-    assert_eq(set_cell(0, 0, 0x61u32, RED, DEFAULT).unwrap_err().kind(), OutOfBounds)
+    assert_eq(set_cell(0, 0, 0x61, RED, DEFAULT).unwrap_err().kind(), OutOfBounds)
     assert_eq(print_at(0, 0, RED, DEFAULT, "hello").unwrap_err().kind(), OutOfBounds)
 
     assert(clear().is_ok(), "clearing a screen of no cells is not a failure")

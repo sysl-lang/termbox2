@@ -216,7 +216,7 @@ val INVISIBLE: u64   = c_invisible()
 //
 // This is arithmetic rather than a constant out of the header, so it is here rather than in the C:
 // there is no `#define` to read, and the layout is the mode's definition.
-rgb(r: u8, g: u8, b: u8) -> u64 = (u64(r) << 16u64) | (u64(g) << 8u64) | u64(b)
+rgb(r: u8, g: u8, b: u8) -> u64 = (u64(r) << 16) | (u64(g) << 8) | u64(b)
 
 // ==================================================================================================
 // Starting and stopping
@@ -314,7 +314,7 @@ set_cell(x: int, y: int, ch: u32, fg: u64, bg: u64) -> Result[unit, Error] =
 print_at(x: int, y: int, fg: u64, bg: u64, s: string) -> Result[usize, Error]
     val text = cstring(s)
 
-    var w: u64 = 0u64
+    var w: u64 = 0
 
     val rv = c_print(x, y, fg, bg, text.ptr, &w)
 
@@ -333,7 +333,7 @@ end print_at
 // here reports the mistake, and a caller who reaches this has a bug either way -- one reported at the
 // call beats one that surfaces as bytes that never arrived. `termbox2.c` says the same at the shim.
 send(bytes: []const u8) -> Result[unit, Error]
-    if bytes.len == 0usize then
+    if bytes.len == 0 then
         Ok(())
     else
         ok(c_send(&bytes[0], bytes.len))
@@ -686,14 +686,14 @@ struct Event
     // A control key elsewhere arrives as a `Ctrl*` variant of `Key` rather than as a modifier on a
     // letter, which is the terminal's doing and not termbox's: Ctrl-A is one byte, and no byte says
     // "A with control held".
-    alt(self) -> bool = (self.mods & c_mod_alt()) != 0u8
+    alt(self) -> bool = (self.mods & c_mod_alt()) != 0
 
-    ctrl(self) -> bool = (self.mods & c_mod_ctrl()) != 0u8
+    ctrl(self) -> bool = (self.mods & c_mod_ctrl()) != 0
 
-    shift(self) -> bool = (self.mods & c_mod_shift()) != 0u8
+    shift(self) -> bool = (self.mods & c_mod_shift()) != 0
 
     // The mouse moved with a button down. Only on a `Mouse` event.
-    motion(self) -> bool = (self.mods & c_mod_motion()) != 0u8
+    motion(self) -> bool = (self.mods & c_mod_motion()) != 0
 end Event
 
 // Wait for something to happen.
@@ -704,7 +704,7 @@ poll_event() -> Result[Event, Error]
     var t: int  = 0
     var m: int  = 0
     var k: int  = 0
-    var ch: u32 = 0u32
+    var ch: u32 = 0
     var w: int  = 0
     var h: int  = 0
     var x: int  = 0
@@ -724,7 +724,7 @@ peek_event(timeout_ms: int) -> Result[Option[Event], Error]
     var t: int  = 0
     var m: int  = 0
     var k: int  = 0
-    var ch: u32 = 0u32
+    var ch: u32 = 0
     var w: int  = 0
     var h: int  = 0
     var x: int  = 0

@@ -8,11 +8,11 @@
 // arrived against `sysl.sum`, and compiles it as more modules.
 //
 //     dependencies {
-//       termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.1.0" }
+//       termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.1.1" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.1.0` on this repository. `build-lib` and `--lib` still work and are what the tests here
+// tag `v0.1.1` on this repository. `build-lib` and `--lib` still work and are what the tests here
 // use, but they are no longer the only way in.
 
 // `name` is the package; the module a program imports is `sh.sysl.termbox2`, and the two are
@@ -22,7 +22,7 @@
 
 package {
   name    = "termbox2"
-  version = "0.1.0"
+  version = "0.1.1"
 }
 
 // **`posix`, because a terminal is what this package is for.** termbox puts the terminal into raw
