@@ -155,11 +155,9 @@ end ErrorKind
 impl Display for ErrorKind
     display(self, out: *Writer, fmt: FormatSpec) = display_str(self.name(), out, fmt)
 
-// A simple enum carries no `==` of its own (`09 §2`), and comparing two kinds is what a caller
-// branching on a failure does. The discriminant is the comparison, in one line rather than twenty.
-impl Eq for ErrorKind
-    eq(self, rhs: ErrorKind) -> bool = int(self) == int(rhs)
-end ErrorKind
+// Comparing two kinds is what a caller branching on a failure does, and it needs nothing written
+// here: as of sysl 0.0.34 a simple enum *is* its discriminant and carries `==` by rule (`09 §2`,
+// `14 §5`). Every enum in this file used to state that in an `impl Eq` performing that comparison.
 
 private error_kind(ordinal: int) -> ErrorKind = ErrorKind.try(ordinal).unwrap_or(UnknownError)
 
@@ -407,10 +405,6 @@ enum OutputMode
         UnknownOutput -> "UnknownOutput"
 end OutputMode
 
-impl Eq for OutputMode
-    eq(self, rhs: OutputMode) -> bool = int(self) == int(rhs)
-end OutputMode
-
 impl Display for OutputMode
     display(self, out: *Writer, fmt: FormatSpec) = display_str(self.name(), out, fmt)
 
@@ -450,10 +444,6 @@ enum EventKind
         Resize       -> "Resize"
         Mouse        -> "Mouse"
         UnknownEvent -> "UnknownEvent"
-end EventKind
-
-impl Eq for EventKind
-    eq(self, rhs: EventKind) -> bool = int(self) == int(rhs)
 end EventKind
 
 impl Display for EventKind
@@ -627,10 +617,6 @@ enum Key
         MouseWheelUp     -> "MouseWheelUp"
         MouseWheelDown   -> "MouseWheelDown"
         UnknownKey       -> "UnknownKey"
-end Key
-
-impl Eq for Key
-    eq(self, rhs: Key) -> bool = int(self) == int(rhs)
 end Key
 
 impl Display for Key
