@@ -31,7 +31,7 @@ package {
 // work on a freestanding target" into one refusal before anything is compiled, rather than a link
 // error naming `tcsetattr`.
 //
-// **`alloc`, because the screen is a heap allocation.** termbox holds two cell buffers sized to the
+// **`heap`, because the screen lives on one.** termbox holds two cell buffers sized to the
 // terminal, and reallocates both on a resize; the input buffer grows the same way. Unlike monocypher,
 // which allocates nothing and therefore names nothing, this is a library whose whole job needs a
 // heap -- the size of a terminal is not known until it is asked.
@@ -43,6 +43,6 @@ package {
 // for the linker to be given (`15 §8`). Compare qcbor, which names `m` because its numeric coercions
 // reach `pow`.
 requires {
-  alloc = true
+  heap  = true
   posix = true
 }
