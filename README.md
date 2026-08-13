@@ -11,15 +11,28 @@ in the binding's header — there is no external library to name.
 ```
 sh/sysl/termbox2/
     termbox2.sysl       the binding
-    termbox2.c          the implementation and the shim, in one translation unit
-    termbox2.h          vendored from termbox/termbox2
-    tests.sysl          21 tests, none of which needs a terminal
+    keys.sysl           the named keys, and the numbers termbox reports for them
+    tests.sysl          22 tests, none of which needs a terminal
+    c/
+        c.sysl          termbox as C declares it: the constants, the externs, the three shims
+        termbox2.c      the implementation, and what only C can reach
+        options.h       the compile-time options, in the one place everything goes through
+        termbox2.h      vendored from termbox/termbox2
 package.hocon           who this package is, and what it needs of the machine
 ```
 
-The module is **`sh.sysl.termbox2`**, and the three directories are that name: a dotted module name
-mirrors its path from the library root. The prefix is the reverse-DNS of `sysl.sh`, so that a package
-claims a name nobody else will mint rather than the top-level word `termbox2`.
+The module is **`sh.sysl.termbox2`**, and the directories are that name: a dotted module name mirrors
+its path from the library root. The prefix is the reverse-DNS of `sysl.sh`, so that a package claims a
+name nobody else will mint rather than the top-level word `termbox2`.
+
+**Everything that is C lives in `c/`**, module `sh.sysl.termbox2.c` — the headers, the one `.c` file,
+and the sysl declarations over them. That is the two-layer shape every binding in this organisation
+uses, and the point of it is that the two halves have different jobs: the `c` layer has to be
+*faithful*, because a signature that disagrees with the header links perfectly and corrupts the call at
+run time, and the layer above it has to be *pleasant*, which is a different question that would
+otherwise be answered in the same breath. A program imports `sh.sysl.termbox2`; **a program that wants
+termbox's own spelling may import `sh.sysl.termbox2.c` as well**, and `c.set_cell(…)` or `c.KEY_ESC`
+then reads as dropping into C on purpose.
 
 ## Using it
 
@@ -27,12 +40,12 @@ Name it in your project's `package.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.1.2" }
+  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.2.0" }
 }
 ```
 
 The coordinate is an identity rather than a URL, so it carries no `https://`, and `version` is the
-tag `v0.1.2` here.
+tag `v0.2.0` here.
 
 Or point at it directly, which needs no fetching and is what this repository's own tests do. Either a
 built artifact or the source tree works, and they are the same road:
@@ -121,7 +134,10 @@ peek_event(timeout_ms) -> Option[Event]
 fds() -> (int, int)                     // for a program running its own select loop
 
 version() / attr_width() / has_truecolor() / has_egc()
-wcwidth(ch) / is_printable(ch) / key_code(Key) / last_errno()
+wcwidth(ch) / is_printable(ch) / last_errno()
+
+Key.code() -> Option[int]               // what an event would have carried
+Key.of(code) / EventKind.of(v) / OutputMode.of(v) / ErrorKind.of(code)
 ```
 
 **Every call answers a `Result`, because a terminal is a resource rather than a canvas** — it may not
@@ -213,33 +229,70 @@ This package is the organisation's worked example of the *vendored* half of the 
 [regex](https://github.com/sysl-lang/regex) is the example of binding a library the machine already
 has. Three things here are worth taking away.
 
-**1. Put the implementation and the shim in ONE translation unit.** termbox2 is a single header, so
-somebody has to write the `.c` that defines `TB_IMPL` and includes it. The shim goes in that same
-file, and not beside it, because **a header library's compile-time options are part of its ABI**:
-`TB_OPT_ATTR_W` chooses the width of `uintattr_t`, which is the type of `tb_set_cell`'s `fg` and `bg`.
-A second `.c` that included the header without setting it identically would declare those functions
-with 16-bit parameters, call the 64-bit definitions, and be wrong in a way that compiles, links, and
-corrupts colours at run time. One translation unit makes that impossible rather than merely unlikely.
+**1. A header library's compile-time options are part of its ABI, so write them in ONE place that
+everything includes.** termbox2 is a single header, so somebody has to write the `.c` that defines
+`TB_IMPL` and includes it — and `TB_OPT_ATTR_W` chooses the width of `uintattr_t`, which is the type
+of `tb_set_cell`'s `fg` and `bg`, *and* the values of the twelve style attributes. Anything else that
+included the header without setting it identically would be wrong in a way that compiles, links, and
+corrupts colours at run time.
 
-**2. Write a shim for what only C can see, and nothing else.** Three things in `termbox2.h` are
-reachable from C and from nothing else (`15 §7`):
+That used to be an argument for keeping the shim in the same translation unit as the implementation.
+**It is now an argument for `options.h`**, because there is a second reader: the `c const` block below
+is measured from a probe translation unit of the compiler's own making, which includes what `@include`
+names. A probe that read `termbox2.h` directly would fail outright on the four attributes that exist
+only at width 64 and silently measure eight others as numbers the implementation does not use. Both
+the `.c` and the `@include` name `options.h` instead, and the option is written once.
+
+**2. Ask the C compiler for the constants — do not write a function that returns one.** `TB_RED`,
+`TB_KEY_ARROW_UP`, `TB_ERR_NOT_INIT` and about a hundred others are `#define`s, with no symbol for a
+linker to resolve and nothing for `extern` to name. **`c const` is what reaches them** (`15 §7`):
+
+```sysl
+c const
+    RED:          u64 = "TB_RED"
+    KEY_ARROW_UP: int = "TB_KEY_ARROW_UP"
+```
+
+This package used to carry a C function per constant, which was the same thing at one remove and worse
+in a way that is easy to miss: **a value reached through a call is not a constant**, so it cannot size
+an array, stand in a `match` arm, or be folded into a bound. Everything in the next paragraph follows
+from getting them as constants.
+
+**3. Then the tables cross in sysl, and the compiler checks them.** termbox reports a key as a number
+and this binding answers a `Key`; the number has to travel the other way too, for a program that reads
+"F5" out of a configuration file. That was **two C `switch`es agreeing with the declaration order of an
+enum in another language, with nothing comparing the two halves** — and the binding's own comment
+admitted it, saying the declaration order *was* the agreement. Four tables were like that: the keys,
+the errors, the output modes and the event kinds.
+
+They are `match`es against `c.KEY_*` now, so both languages read the same names out of the same header.
+Three things come with that, and none of them was available before:
+
+- a name that is not in the header is a **compile error** rather than a number nobody checked;
+- **two arms standing for one value is a refusal** (`09 §2`), where the C `switch` quietly took the
+  first — which matters here, because several termbox keys share a byte;
+- **`termbox2.c` went from 539 lines to 123**, and four `ORDINAL_` lists that existed only to be
+  agreed with went with it.
+
+**4. Where a table crosses in one direction, write the other direction so it can be tested.** An arm
+that is missing or paired with the wrong constant compiles, links, and quietly reports the wrong key
+forever — and nothing can see it, because a key value only arrives from a terminal somebody is typing
+at. `Key.code` is useful on its own *and* makes the table round-trippable, and one test walks every
+variant through both. A round trip cannot catch a variant paired with the wrong constant in *both*
+directions, so a second test pins the numbers `termbox2.h` states outright.
+
+**5. Write a shim only for what genuinely cannot cross.** Two things are left, and both are about a
+layout rather than a value:
 
 | what | why it cannot cross |
 |---|---|
-| the constants | `TB_RED`, `TB_BOLD`, `TB_KEY_ARROW_UP`, `TB_ERR_NOT_INIT` and a hundred others are `#define`s. A macro has no symbol, so there is nothing for a linker to resolve and nothing for `extern` to name. |
 | `struct tb_event` | A layout only the header knows. The shim splits it into eight plain out-parameters, so the struct never crosses. |
 | `size_t *out_w` | `tb_print_ex` reports the width it printed through a pointer; pairing that with the return code in the shim is what lets the sysl side answer one `Result`. |
 
 Everything else — `tb_init`, `tb_present`, `tb_set_cell` — is an ordinary symbol with an ordinary
-signature, and the binding names it with `extern` directly. **A shim function that only forwarded
-would be a second place for the argument order to be wrong.**
-
-**3. Where a table crosses in one direction, write the other direction so it can be tested.** The key
-table is a switch from termbox's numbers to an enum's ordinals. A case that is missing, duplicated, or
-paired with the wrong constant compiles, links, and quietly reports the wrong key forever — and
-nothing can see it, because a key value only arrives from a terminal somebody is typing at. The
-inverse switch (`key_code`, which is useful on its own) makes the whole table round-trippable, and
-one test walks it.
+signature, and `c/c.sysl` names it with `extern` directly. **A shim function that only forwarded would
+be a second place for the argument order to be wrong.** (`send` is a third shim for a different
+reason: it is a deliberate divergence from upstream, and it needs a macro of termbox's own.)
 
 ## Testing
 
@@ -247,11 +300,13 @@ one test walks it.
 sysl test .
 ```
 
-21 tests, and **none of them needs a terminal** — they set `TERM` themselves so that a build runner
+22 tests, and **none of them needs a terminal** — they set `TERM` themselves so that a build runner
 with none does not report itself instead of the binding. What they cover:
 
-- the three compile-time options, each of which is invisible to the linker;
-- both directions of the key table, the output-mode table and the input-mode mask;
+- the three compile-time options, each of which is invisible to the linker — and which now have to
+  reach two translation units rather than one;
+- both directions of the key table, the output-mode table and the input-mode mask, plus the key
+  numbers the header states outright, which a round trip cannot check;
 - the error path across fifteen entry points, plus a failure carrying an `errno` and a code termbox
   has never issued;
 - the whole lifecycle against an ordinary file, including that `send`'s bytes come out the far end
@@ -266,7 +321,13 @@ That is the honest state of a program run under a pipe, and the tests pin exactl
 every consumer compiles.** Shipping test scaffolding to every program that draws a menu was judged
 not worth it.
 
-So drawing is checked by hand, and here is the recipe, which allocates a pty and gives it a size:
+Two more things are checked by hand for the same reason — a package cannot carry a program, so nothing
+in this repository can be a *consumer* of it. Both were run when the `c/` layer was introduced: a
+program importing `sh.sysl.termbox2` builds against the source root **and** against a `.syslib`, and a
+program importing `sh.sysl.termbox2.c` alongside it reaches `c.KEY_ARROW_UP` and `c.wcwidth`, which is
+the claim that a consumer may drop into C on purpose.
+
+Drawing is checked by hand too, and here is the recipe, which allocates a pty and gives it a size:
 
 ```
 sysl build yourprogram.sysl --lib . -o demo

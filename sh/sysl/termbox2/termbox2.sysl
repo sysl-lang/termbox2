@@ -1,12 +1,13 @@
 module sh.sysl.termbox2
 
+import sh.sysl.termbox2.c
 import sysl.text.{cstring, from_cstring}
 
 // A full-screen terminal interface, bound to termbox2.
 //
 // **Nothing has to be installed to use this package.** termbox2 is a single-header library and this
 // package carries the header; sysl compiles a library's C as part of the build (`15 §7`), so there is
-// no `-l` flag, no `pkg-config`, and no `@link` in this header -- there is no external library to
+// no `-l` flag, no `pkg-config`, and no `@link` in this package -- there is no external library to
 // name. What it does need of the machine is POSIX, which `package.hocon` says.
 //
 // ==What a termbox program looks like==
@@ -37,13 +38,32 @@ import sysl.text.{cstring, from_cstring}
 //
 // `fg` and `bg` are `u64`, and a colour is bitwise-or'd with any style attributes wanted:
 // `RED | BOLD | UNDERLINE`. That is termbox's own design rather than something added here, and it is
-// what makes `set_cell` take two integers instead of a struct. The values are read out of the header
-// by the C beside this file, for the reason `15 §7` gives: a `#define` has no symbol, and a number
-// transcribed into sysl is a number that was right on one machine.
+// what makes `set_cell` take two integers instead of a struct.
 //
 // What the numbers *mean* depends on the output mode -- `RED` in `Normal`, an index in `Color256`, an
 // `0xRRGGBB` value in `Truecolor`. `set_output_mode` says which, and the attributes above the colour
 // bits work the same in all of them.
+//
+// ==Where the numbers come from==
+//
+// **Every constant here is the one the C compiler works out from `termbox2.h`**, asked for by the
+// `c const` block in `sh.sysl.termbox2.c` and named again here under a pleasant name. Nothing is
+// transcribed: `15 §7` calls a written-down constant "correct on one machine" with "nothing checking
+// it", and each of these was a C function returning the `#define` until `c const` arrived -- which was
+// the same thing at one remove, since a value reached through a call is not a constant.
+//
+// The enumerations are matched against those constants **in sysl**, in both directions where the
+// number travels both ways. There is no longer any agreement between a declaration order here and
+// anything in C, which is what the arrangement bought: a mispaired arm is now a mistake in one
+// language that the compiler reads, rather than a silent disagreement between two lists nothing
+// compared. `keys.sysl` holds the largest of those tables and nothing else.
+//
+// ==What is NOT here, and why==
+//
+// **There is no `impl Drop` and no handle type, because termbox has neither.** The library is a
+// singleton: `init` takes over the terminal, every call after it acts on that one screen, and
+// `shutdown` gives it back. There is nothing for an owner to own, so the pattern the other bindings in
+// this org use for a C allocation would be scaffolding around nothing.
 
 // ==================================================================================================
 // Errors
@@ -65,14 +85,14 @@ struct Error
     //
     // The bytes are termbox's own storage and the next call to this overwrites them, which costs
     // nothing here because the string is copied out before returning.
-    message(self) -> string = from_cstring_or(c_strerror(self.code), "unrecognized error code")
+    message(self) -> string = from_cstring_or(c.strerror(self.code), "unrecognized error code")
 
-    kind(self) -> ErrorKind = error_kind(c_error_ordinal(self.code))
+    kind(self) -> ErrorKind = ErrorKind.of(self.code)
 
     // The `errno` in effect when termbox last recorded one. Only some failures set it -- `InitOpen`,
     // `ReadFailed`, `PollFailed`, the `Tc*` pair and the `Resize*` family -- and it is untouched
     // otherwise, so reading it after any other kind answers whatever went before.
-    errno(self) -> int = c_last_errno()
+    errno(self) -> int = c.last_errno()
 end Error
 
 // An `Error` renders as termbox's own sentence for it, so `f"${err}"` and a `main` that results in
@@ -81,10 +101,6 @@ impl Display for Error
     display(self, out: *Writer, fmt: FormatSpec) = display_str(self.message(), out, fmt)
 
 // The failures termbox names, for matching on.
-//
-// **The declaration order IS the agreement with `termbox2.c`**, whose `ORDINAL_` list runs down the
-// same names in the same order. Nothing restates it here: the discriminants are implicit, so they are
-// 0 upward in declaration order.
 //
 // `UnknownError` exists because a termbox newer than this binding may report something not listed
 // here. Answering it keeps a program running and printing rather than trapping on a number, and
@@ -123,6 +139,34 @@ enum ErrorKind
     CapCollision
     UnknownError
 
+    // Which failure a code is. **This travels one way only** -- termbox answers a code and nothing
+    // here ever asks for one -- so there is no `code` to go with it, and a code the list does not
+    // name is `UnknownError` rather than a trap.
+    of(code: int) -> ErrorKind = code match
+        c.ERR                  -> Failed
+        c.ERR_NEED_MORE        -> NeedMore
+        c.ERR_INIT_ALREADY     -> InitAlready
+        c.ERR_INIT_OPEN        -> InitOpen
+        c.ERR_MEM              -> OutOfMemory
+        c.ERR_NO_EVENT         -> NoEvent
+        c.ERR_NO_TERM          -> NoTerm
+        c.ERR_NOT_INIT         -> NotInit
+        c.ERR_OUT_OF_BOUNDS    -> OutOfBounds
+        c.ERR_READ             -> ReadFailed
+        c.ERR_RESIZE_IOCTL     -> ResizeIoctl
+        c.ERR_RESIZE_PIPE      -> ResizePipe
+        c.ERR_RESIZE_SIGACTION -> ResizeSigaction
+        c.ERR_POLL             -> PollFailed
+        c.ERR_TCGETATTR        -> TcGetAttr
+        c.ERR_TCSETATTR        -> TcSetAttr
+        c.ERR_UNSUPPORTED_TERM -> UnsupportedTerm
+        c.ERR_RESIZE_WRITE     -> ResizeWrite
+        c.ERR_RESIZE_POLL      -> ResizePoll
+        c.ERR_RESIZE_READ      -> ResizeRead
+        c.ERR_RESIZE_SSCANF    -> ResizeSscanf
+        c.ERR_CAP_COLLISION    -> CapCollision
+        _                      -> UnknownError
+
     // The variant's own name, for a program reporting a failure it did not expect and for the
     // assertion that says which kind it actually got. `Error.message` is the sentence a reader
     // should see; this is the label a *programmer* should.
@@ -159,8 +203,6 @@ impl Display for ErrorKind
 // here: as of sysl 0.0.34 a simple enum *is* its discriminant and carries `==` by rule (`09 §2`,
 // `14 §5`). Every enum in this file used to state that in an `impl Eq` performing that comparison.
 
-private error_kind(ordinal: int) -> ErrorKind = ErrorKind.try(ordinal).unwrap_or(UnknownError)
-
 // **Every termbox entry point answers a negative number for a failure and a non-negative one for an
 // answer**, which is what makes these two lines the whole of the error handling. `tb_width` returns
 // the width or `TB_ERR_NOT_INIT`; `tb_set_input_mode` returns the mode now in effect or a failure.
@@ -179,15 +221,15 @@ private ok_int(rv: int) -> Result[int, Error] = if rv < 0 then Err(Error(rv)) el
 // **These are the values for `Normal` output mode.** In `Color256` a colour is an index 0..255 and
 // `HI_BLACK` is how black is spelled, because 0 means default; in `Truecolor` it is `0xRRGGBB` and
 // `rgb` builds one. `set_output_mode` has the whole table.
-val DEFAULT: u64 = c_default()
-val BLACK: u64   = c_black()
-val RED: u64     = c_red()
-val GREEN: u64   = c_green()
-val YELLOW: u64  = c_yellow()
-val BLUE: u64    = c_blue()
-val MAGENTA: u64 = c_magenta()
-val CYAN: u64    = c_cyan()
-val WHITE: u64   = c_white()
+const DEFAULT: u64 = c.DEFAULT
+const BLACK: u64   = c.BLACK
+const RED: u64     = c.RED
+const GREEN: u64   = c.GREEN
+const YELLOW: u64  = c.YELLOW
+const BLUE: u64    = c.BLUE
+const MAGENTA: u64 = c.MAGENTA
+const CYAN: u64    = c.CYAN
+const WHITE: u64   = c.WHITE
 
 // Style attributes, bitwise-or'd onto a colour: `RED | BOLD | UNDERLINE`.
 //
@@ -197,22 +239,22 @@ val WHITE: u64   = c_white()
 // `REVERSE` and leaves the rest to a setting.
 //
 // `HI_BLACK` is not a style: it is black in the modes where 0 means default.
-val BOLD: u64        = c_bold()
-val UNDERLINE: u64   = c_underline()
-val REVERSE: u64     = c_reverse()
-val ITALIC: u64      = c_italic()
-val BLINK: u64       = c_blink()
-val HI_BLACK: u64    = c_hi_black()
-val BRIGHT: u64      = c_bright()
-val DIM: u64         = c_dim()
-val STRIKEOUT: u64   = c_strikeout()
-val UNDERLINE_2: u64 = c_underline_2()
-val OVERLINE: u64    = c_overline()
-val INVISIBLE: u64   = c_invisible()
+const BOLD: u64        = c.BOLD
+const UNDERLINE: u64   = c.UNDERLINE
+const REVERSE: u64     = c.REVERSE
+const ITALIC: u64      = c.ITALIC
+const BLINK: u64       = c.BLINK
+const HI_BLACK: u64    = c.HI_BLACK
+const BRIGHT: u64      = c.BRIGHT
+const DIM: u64         = c.DIM
+const STRIKEOUT: u64   = c.STRIKEOUT
+const UNDERLINE_2: u64 = c.UNDERLINE_2
+const OVERLINE: u64    = c.OVERLINE
+const INVISIBLE: u64   = c.INVISIBLE
 
 // A 24-bit colour for `Truecolor` output mode, which is what the mode's `0xRRGGBB` means written out.
 //
-// This is arithmetic rather than a constant out of the header, so it is here rather than in the C:
+// This is arithmetic rather than a constant out of the header, so it is here rather than in `c`:
 // there is no `#define` to read, and the layout is the mode's definition.
 rgb(r: u8, g: u8, b: u8) -> u64 = (u64(r) << 16) | (u64(g) << 8) | u64(b)
 
@@ -226,27 +268,27 @@ rgb(r: u8, g: u8, b: u8) -> u64 = (u64(r) << 16) | (u64(g) << 8) | u64(b)
 // **`shutdown` has to be reached on every path out**, including the failing ones. See the note at the
 // top of this file: a program that exits without it leaves the reader with a terminal in raw mode and
 // no echo, which they cannot see to fix.
-init() -> Result[unit, Error] = ok(c_init())
+init() -> Result[unit, Error] = ok(c.init())
 
 // Take over the terminal named by a path, which is `init`'s answer to a program with more than one.
 init_file(path: string) -> Result[unit, Error]
     val p = cstring(path)
 
-    ok(c_init_file(p.ptr))
+    ok(c.init_file(p.ptr))
 end init_file
 
 // Take over a terminal already open, reading and writing the same descriptor.
-init_fd(fd: int) -> Result[unit, Error] = ok(c_init_fd(fd))
+init_fd(fd: int) -> Result[unit, Error] = ok(c.init_fd(fd))
 
 // The same, reading one descriptor and writing another.
 //
 // **Neither has to be a terminal.** Where neither is, termbox skips `tcgetattr` and `ioctl` entirely
 // and the screen is zero by zero -- which is not useful for drawing, and is exactly what makes the
 // lifecycle testable off a terminal. See `tests.sysl`.
-init_rwfd(rfd: int, wfd: int) -> Result[unit, Error] = ok(c_init_rwfd(rfd, wfd))
+init_rwfd(rfd: int, wfd: int) -> Result[unit, Error] = ok(c.init_rwfd(rfd, wfd))
 
 // Give the terminal back: raw mode off, the cursor shown, the alternate screen dropped.
-shutdown() -> Result[unit, Error] = ok(c_shutdown())
+shutdown() -> Result[unit, Error] = ok(c.shutdown())
 
 // ==================================================================================================
 // The screen
@@ -260,33 +302,33 @@ shutdown() -> Result[unit, Error] = ok(c_shutdown())
 // **After an `init_rwfd` where neither descriptor is a terminal there is no size to report**, and
 // both answer `Failed` rather than a number -- termbox never asked, because there was nothing to ask.
 // A program in that state can still init, present and shut down; every cell is out of bounds.
-width() -> Result[int, Error] = ok_int(c_width())
+width() -> Result[int, Error] = ok_int(c.width())
 
-height() -> Result[int, Error] = ok_int(c_height())
+height() -> Result[int, Error] = ok_int(c.height())
 
 // Empty the back buffer, filling it with spaces in the attributes `set_clear_attrs` last named.
-clear() -> Result[unit, Error] = ok(c_clear())
+clear() -> Result[unit, Error] = ok(c.clear())
 
 // What `clear` fills with. `DEFAULT`/`DEFAULT` until told otherwise.
-set_clear_attrs(fg: u64, bg: u64) -> Result[unit, Error] = ok(c_set_clear_attrs(fg, bg))
+set_clear_attrs(fg: u64, bg: u64) -> Result[unit, Error] = ok(c.set_clear_attrs(fg, bg))
 
 // Send the back buffer to the terminal, and this is the only call that writes anything.
 //
 // **Only the cells that changed are sent**, which is what keeps a full-screen redraw from flickering
 // and is the reason a termbox program may cheerfully rewrite every cell every frame.
-present() -> Result[unit, Error] = ok(c_present())
+present() -> Result[unit, Error] = ok(c.present())
 
 // Forget what the terminal is believed to be showing, so the next `present` sends every cell.
 //
 // For a program that shelled out to something that drew on the screen, or that changed output mode
 // and wants the whole screen reinterpreted at once rather than as cells happen to be touched.
-invalidate() -> Result[unit, Error] = ok(c_invalidate())
+invalidate() -> Result[unit, Error] = ok(c.invalidate())
 
 // Put the cursor somewhere and show it. Hidden is the state after `init`, which is what a full-screen
 // program usually wants; an editor wants it at the insertion point.
-set_cursor(x: int, y: int) -> Result[unit, Error] = ok(c_set_cursor(x, y))
+set_cursor(x: int, y: int) -> Result[unit, Error] = ok(c.set_cursor(x, y))
 
-hide_cursor() -> Result[unit, Error] = ok(c_hide_cursor())
+hide_cursor() -> Result[unit, Error] = ok(c.hide_cursor())
 
 // ==================================================================================================
 // Drawing
@@ -298,7 +340,7 @@ hide_cursor() -> Result[unit, Error] = ok(c_hide_cursor())
 // much emoji -- takes the cell after it as well, so the next thing a caller sets should be two
 // columns along; anything set in the cell between is ignored.
 set_cell(x: int, y: int, ch: u32, fg: u64, bg: u64) -> Result[unit, Error] =
-    ok(c_set_cell(x, y, ch, fg, bg))
+    ok(c.set_cell(x, y, ch, fg, bg))
 
 // A string, left to right from `x`, in one pair of attributes. Answers how many columns it took.
 //
@@ -314,7 +356,7 @@ print_at(x: int, y: int, fg: u64, bg: u64, s: string) -> Result[usize, Error]
 
     var w: u64 = 0
 
-    val rv = c_print(x, y, fg, bg, text.ptr, &w)
+    val rv = c.print_ex(x, y, fg, bg, text.ptr, &w)
 
     if rv < 0 then Err(Error(rv)) else Ok(usize(w))
 end print_at
@@ -334,7 +376,7 @@ send(bytes: []const u8) -> Result[unit, Error]
     if bytes.len == 0 then
         Ok(())
     else
-        ok(c_send(&bytes[0], bytes.len))
+        ok(c.send(&bytes[0], bytes.len))
 end send
 
 // ==================================================================================================
@@ -356,6 +398,20 @@ end send
 struct InputMode
     alt: bool
     mouse: bool
+
+    // The mask termbox wants for this pair.
+    //
+    // **`INPUT_ESC` and `INPUT_ALT` are alternatives, and termbox states that rule without enforcing
+    // it**: asking for both behaves as if only `ESC` had been asked for. Choosing between them here,
+    // rather than or-ing them, is what makes two booleans unable to compose into something
+    // meaningless.
+    code(self) -> int =
+        (if self.alt then c.INPUT_ALT else c.INPUT_ESC) | (if self.mouse then c.INPUT_MOUSE else 0)
+
+    // What a mask termbox reported means. `alt` is true only where `ALT` is set and `ESC` is not, for
+    // the reason above -- a mask with both is a mask behaving as `ESC`.
+    of(mask: int) -> InputMode =
+        InputMode((mask & c.INPUT_ALT) != 0 && (mask & c.INPUT_ESC) == 0, (mask & c.INPUT_MOUSE) != 0)
 end InputMode
 
 // Choose how input is read.
@@ -363,17 +419,13 @@ end InputMode
 // **Setting a mode and asking which one is in effect are two calls**, and that is termbox's shape
 // rather than a choice made here: one entry point does both, and it tells them apart by being handed
 // `TB_INPUT_CURRENT`. Splitting them is what lets each answer the thing it is actually about.
-set_input_mode(m: InputMode) -> Result[unit, Error] =
-    ok(c_set_input_mode(c_input_value(if m.alt then 1 else 0, if m.mouse then 1 else 0)))
+set_input_mode(m: InputMode) -> Result[unit, Error] = ok(c.set_input_mode(m.code()))
 
 // What input mode is in effect, without changing it.
 input_mode() -> Result[InputMode, Error]
-    val rv = c_set_input_mode(c_input_current())
+    val rv = c.set_input_mode(c.INPUT_CURRENT)
 
-    if rv < 0 then
-        Err(Error(rv))
-    else
-        Ok(InputMode(c_input_is_alt(rv) != 0, c_input_has_mouse(rv) != 0))
+    if rv < 0 then Err(Error(rv)) else Ok(InputMode.of(rv))
 end input_mode
 
 // What the numbers in `fg` and `bg` mean.
@@ -396,6 +448,26 @@ enum OutputMode
     Truecolor
     UnknownOutput
 
+    // The number termbox wants for this mode, and **`UnknownOutput` has none** -- it is the answer to
+    // "what mode is this?" for a number this binding does not recognize, and not a mode anything can
+    // be put into. `set_output_mode` turns the `None` into a refusal.
+    code(self) -> Option[int] = self match
+        Normal        -> Some(c.OUTPUT_NORMAL)
+        Color256      -> Some(c.OUTPUT_256)
+        Color216      -> Some(c.OUTPUT_216)
+        Grayscale     -> Some(c.OUTPUT_GRAYSCALE)
+        Truecolor     -> Some(c.OUTPUT_TRUECOLOR)
+        UnknownOutput -> None
+
+    // Which mode a number termbox reported is.
+    of(value: int) -> OutputMode = value match
+        c.OUTPUT_NORMAL    -> Normal
+        c.OUTPUT_256       -> Color256
+        c.OUTPUT_216       -> Color216
+        c.OUTPUT_GRAYSCALE -> Grayscale
+        c.OUTPUT_TRUECOLOR -> Truecolor
+        _                  -> UnknownOutput
+
     name(self) -> string = self match
         Normal        -> "Normal"
         Color256      -> "Color256"
@@ -410,19 +482,17 @@ impl Display for OutputMode
 
 // Choose what the numbers mean. Two calls rather than one, for the reason `set_input_mode` gives.
 //
-// **`UnknownOutput` is refused** -- it is the answer to "what mode is this?" for a number this
-// binding does not recognize, and not a mode anything can be put into. Asking for it answers
-// `Failed`.
-set_output_mode(m: OutputMode) -> Result[unit, Error] = ok(c_set_output_mode(c_output_value(int(m))))
+// **`UnknownOutput` is refused** rather than rounded to `Normal`, which is what a caller who asked
+// for a mode that does not exist should get.
+set_output_mode(m: OutputMode) -> Result[unit, Error] = m.code() match
+    Some(value) -> ok(c.set_output_mode(value))
+    None        -> Err(Error(c.ERR))
 
 // What output mode is in effect, without changing it.
 output_mode() -> Result[OutputMode, Error]
-    val rv = c_set_output_mode(c_output_current())
+    val rv = c.set_output_mode(c.OUTPUT_CURRENT)
 
-    if rv < 0 then
-        Err(Error(rv))
-    else
-        Ok(OutputMode.try(c_output_ordinal(rv)).unwrap_or(UnknownOutput))
+    if rv < 0 then Err(Error(rv)) else Ok(OutputMode.of(rv))
 end output_mode
 
 // ==================================================================================================
@@ -439,6 +509,14 @@ enum EventKind
     Mouse
     UnknownEvent
 
+    // Which kind a number termbox reported is. **One way only**, as `ErrorKind.of` is: an event
+    // arrives and is never asked for.
+    of(value: int) -> EventKind = value match
+        c.EVENT_KEY    -> Keyboard
+        c.EVENT_RESIZE -> Resize
+        c.EVENT_MOUSE  -> Mouse
+        _              -> UnknownEvent
+
     name(self) -> string = self match
         Keyboard     -> "Keyboard"
         Resize       -> "Resize"
@@ -448,190 +526,6 @@ end EventKind
 
 impl Display for EventKind
     display(self, out: *Writer, fmt: FormatSpec) = display_str(self.name(), out, fmt)
-
-// A named key, as against a character the reader typed.
-//
-// **`Event.key` and `Event.ch` are alternatives, and exactly one of them carries the keystroke.** A
-// printable character arrives as `ch`, with `key` left at `Nul`; a key with no character -- an arrow,
-// a function key, Escape, most control keys -- arrives as `key`, with `ch` left at zero.
-//
-// **Several of these share one byte, because the terminal sends one byte for what the reader thinks
-// are two keys.** Backspace and Ctrl-H are both 0x08; Tab and Ctrl-I are both 0x09; Enter and Ctrl-M
-// are both 0x0d; Escape and Ctrl-3 and Ctrl-[ are all 0x1b. Only one name can be answered for one
-// byte, so this list keeps the one a reader is likelier to have meant and the comments say what was
-// lost. A program cannot tell the two apart, and neither can the terminal.
-//
-// **The declaration order IS the agreement with `termbox2.c`**, whose `ORDINAL_` list runs down the
-// same names in the same order.
-enum Key
-    // 0x00 -- Ctrl-Space, and also Ctrl-2 and Ctrl-~, which send the same byte. It is *also* what
-    // `Event.key` holds when the event carries a codepoint in `ch` instead, so the two are told apart
-    // by `ch`: zero for the key, nonzero for a character.
-    Nul
-    CtrlA
-    CtrlB
-    // 0x03. A terminal in raw mode does not turn this into a signal, so a termbox program that wants
-    // Ctrl-C to mean "quit" has to say so itself -- and a program that forgets has taken away the
-    // reader's usual way out.
-    CtrlC
-    CtrlD
-    CtrlE
-    CtrlF
-    CtrlG
-    // 0x08, and also Ctrl-H. Note that most terminals send `Backspace2` for the backspace key.
-    Backspace
-    // 0x09, and also Ctrl-I.
-    Tab
-    CtrlJ
-    CtrlK
-    CtrlL
-    // 0x0d, and also Ctrl-M.
-    Enter
-    CtrlN
-    CtrlO
-    CtrlP
-    CtrlQ
-    CtrlR
-    CtrlS
-    CtrlT
-    CtrlU
-    CtrlV
-    CtrlW
-    CtrlX
-    CtrlY
-    CtrlZ
-    // 0x1b, and also Ctrl-3 and Ctrl-[. What a lone one means depends on `InputMode.alt`.
-    Esc
-    // 0x1c, and also Ctrl-4.
-    CtrlBackslash
-    // 0x1d, and also Ctrl-5.
-    CtrlRightBracket
-    // 0x1e, and also Ctrl-^.
-    Ctrl6
-    // 0x1f, and also Ctrl-7 and Ctrl-_.
-    CtrlSlash
-    // 0x20. The space bar arrives here rather than as the codepoint for a space.
-    Space
-    // 0x7f, and also Ctrl-8. **This is what the backspace key actually sends on most terminals**, so
-    // a program handling only `Backspace` handles the key almost nowhere.
-    Backspace2
-    F1
-    F2
-    F3
-    F4
-    F5
-    F6
-    F7
-    F8
-    F9
-    F10
-    F11
-    F12
-    Insert
-    Delete
-    Home
-    End
-    PageUp
-    PageDown
-    Up
-    Down
-    Left
-    Right
-    // Shift-Tab.
-    BackTab
-    // The mouse buttons, delivered as `Mouse` events with the position in `Event.x` and `Event.y`.
-    MouseLeft
-    MouseRight
-    MouseMiddle
-    MouseRelease
-    MouseWheelUp
-    MouseWheelDown
-    // A key this binding has no name for. `Event.raw_key` still carries the number termbox gave.
-    UnknownKey
-
-    // The variant's own name, which is what a program logging a keystroke it did not handle wants,
-    // and what a failed assertion should say. It is not a *label for a reader* -- "CtrlRightBracket"
-    // is this list's spelling rather than anything a keyboard has printed on it.
-    name(self) -> string = self match
-        Nul              -> "Nul"
-        CtrlA            -> "CtrlA"
-        CtrlB            -> "CtrlB"
-        CtrlC            -> "CtrlC"
-        CtrlD            -> "CtrlD"
-        CtrlE            -> "CtrlE"
-        CtrlF            -> "CtrlF"
-        CtrlG            -> "CtrlG"
-        Backspace        -> "Backspace"
-        Tab              -> "Tab"
-        CtrlJ            -> "CtrlJ"
-        CtrlK            -> "CtrlK"
-        CtrlL            -> "CtrlL"
-        Enter            -> "Enter"
-        CtrlN            -> "CtrlN"
-        CtrlO            -> "CtrlO"
-        CtrlP            -> "CtrlP"
-        CtrlQ            -> "CtrlQ"
-        CtrlR            -> "CtrlR"
-        CtrlS            -> "CtrlS"
-        CtrlT            -> "CtrlT"
-        CtrlU            -> "CtrlU"
-        CtrlV            -> "CtrlV"
-        CtrlW            -> "CtrlW"
-        CtrlX            -> "CtrlX"
-        CtrlY            -> "CtrlY"
-        CtrlZ            -> "CtrlZ"
-        Esc              -> "Esc"
-        CtrlBackslash    -> "CtrlBackslash"
-        CtrlRightBracket -> "CtrlRightBracket"
-        Ctrl6            -> "Ctrl6"
-        CtrlSlash        -> "CtrlSlash"
-        Space            -> "Space"
-        Backspace2       -> "Backspace2"
-        F1               -> "F1"
-        F2               -> "F2"
-        F3               -> "F3"
-        F4               -> "F4"
-        F5               -> "F5"
-        F6               -> "F6"
-        F7               -> "F7"
-        F8               -> "F8"
-        F9               -> "F9"
-        F10              -> "F10"
-        F11              -> "F11"
-        F12              -> "F12"
-        Insert           -> "Insert"
-        Delete           -> "Delete"
-        Home             -> "Home"
-        End              -> "End"
-        PageUp           -> "PageUp"
-        PageDown         -> "PageDown"
-        Up               -> "Up"
-        Down             -> "Down"
-        Left             -> "Left"
-        Right            -> "Right"
-        BackTab          -> "BackTab"
-        MouseLeft        -> "MouseLeft"
-        MouseRight       -> "MouseRight"
-        MouseMiddle      -> "MouseMiddle"
-        MouseRelease     -> "MouseRelease"
-        MouseWheelUp     -> "MouseWheelUp"
-        MouseWheelDown   -> "MouseWheelDown"
-        UnknownKey       -> "UnknownKey"
-end Key
-
-impl Display for Key
-    display(self, out: *Writer, fmt: FormatSpec) = display_str(self.name(), out, fmt)
-
-// The number termbox reports for a named key -- the inverse of what an event carries.
-//
-// For a program that reads "F5" out of a configuration file and wants to compare it against what
-// arrives, or that prints the code for a key it did not expect. `UnknownKey` has no code, which is
-// what the `Option` is for.
-key_code(k: Key) -> Option[int]
-    val code = c_key_value(int(k))
-
-    if code < 0 then None else Some(code)
-end key_code
 
 // Something the reader did.
 //
@@ -656,8 +550,9 @@ struct Event
     // `UnknownKey` for is still identifiable.
     raw_key: int
 
-    // The modifiers, as bits. Read them with the four methods below rather than by hand -- the masks
-    // are `#define`s in the header, so they are C's to know and not this side's.
+    // The modifiers, as bits. Read them with the four methods below rather than by hand -- and
+    // **they stay a mask rather than becoming an enumeration**, because several are true at once,
+    // which is exactly what an enumeration cannot say.
     mods: u8
 
     // The new size, on a `Resize`.
@@ -672,14 +567,14 @@ struct Event
     // A control key elsewhere arrives as a `Ctrl*` variant of `Key` rather than as a modifier on a
     // letter, which is the terminal's doing and not termbox's: Ctrl-A is one byte, and no byte says
     // "A with control held".
-    alt(self) -> bool = (self.mods & c_mod_alt()) != 0
+    alt(self) -> bool = (self.mods & c.MOD_ALT) != 0
 
-    ctrl(self) -> bool = (self.mods & c_mod_ctrl()) != 0
+    ctrl(self) -> bool = (self.mods & c.MOD_CTRL) != 0
 
-    shift(self) -> bool = (self.mods & c_mod_shift()) != 0
+    shift(self) -> bool = (self.mods & c.MOD_SHIFT) != 0
 
     // The mouse moved with a button down. Only on a `Mouse` event.
-    motion(self) -> bool = (self.mods & c_mod_motion()) != 0
+    motion(self) -> bool = (self.mods & c.MOD_MOTION) != 0
 end Event
 
 // Wait for something to happen.
@@ -696,7 +591,7 @@ poll_event() -> Result[Event, Error]
     var x: int  = 0
     var y: int  = 0
 
-    val rv = c_poll_event(&t, &m, &k, &ch, &w, &h, &x, &y)
+    val rv = c.poll_event(&t, &m, &k, &ch, &w, &h, &x, &y)
 
     if rv < 0 then Err(Error(rv)) else Ok(event_of(t, m, k, ch, w, h, x, y))
 end poll_event
@@ -716,7 +611,7 @@ peek_event(timeout_ms: int) -> Result[Option[Event], Error]
     var x: int  = 0
     var y: int  = 0
 
-    val rv = c_peek_event(timeout_ms, &t, &m, &k, &ch, &w, &h, &x, &y)
+    val rv = c.peek_event(timeout_ms, &t, &m, &k, &ch, &w, &h, &x, &y)
 
     if rv >= 0 then
         Ok(Some(event_of(t, m, k, ch, w, h, x, y)))
@@ -727,9 +622,7 @@ peek_event(timeout_ms: int) -> Result[Option[Event], Error]
 end peek_event
 
 private event_of(t: int, m: int, k: int, ch: u32, w: int, h: int, x: int, y: int) -> Event =
-    Event(EventKind.try(c_event_ordinal(t)).unwrap_or(UnknownEvent),
-          Key.try(c_key_ordinal(k)).unwrap_or(UnknownKey),
-          ch, k, u8(m), w, h, x, y)
+    Event(EventKind.of(t), Key.of(k), ch, k, u8(m), w, h, x, y)
 
 // The two descriptors termbox reads, for a program running its own `select` or `poll` loop over
 // several sources at once. Either becoming readable means `poll_event` will answer without blocking.
@@ -740,7 +633,7 @@ fds() -> Result[(int, int), Error]
     var tty: int    = 0
     var resize: int = 0
 
-    val rv = c_get_fds(&tty, &resize)
+    val rv = c.get_fds(&tty, &resize)
 
     if rv < 0 then Err(Error(rv)) else Ok((tty, resize))
 end fds
@@ -750,7 +643,7 @@ end fds
 // ==================================================================================================
 
 // termbox's own version string.
-version() -> string = from_cstring_or(c_version(), "unknown")
+version() -> string = from_cstring_or(c.version(), "unknown")
 
 // How wide an attribute is, in bits -- 64 here, which is what buys `Truecolor` and the four style
 // attributes above the first eight.
@@ -758,17 +651,18 @@ version() -> string = from_cstring_or(c_version(), "unknown")
 // **This is a compile-time option of the vendored header**, and it is reported at run time precisely
 // because nothing else can check it: a `#define` is invisible to the linker, so a mismatch between
 // what the header was compiled with and what a caller assumes would compile, link, and pass the wrong
-// number of bytes. The tests here assert this against the width of the constants for that reason.
-attr_width() -> int = c_attr_width()
+// number of bytes. The tests here assert this against the width of the constants for that reason, and
+// `c/options.h` is the one place the option is written.
+attr_width() -> int = c.attr_width()
 
 // Whether this build has `Truecolor` output mode. True, and it follows from `attr_width` being at
 // least 32.
-has_truecolor() -> bool = c_has_truecolor() != 0
+has_truecolor() -> bool = c.has_truecolor() != 0
 
 // Whether this build has grapheme-cluster cells. **False, deliberately** -- the package does not set
-// `TB_OPT_EGC`, so `tb_set_cell_ex` and `tb_extend_cell` are absent and are not bound. `termbox2.c`
-// says why.
-has_egc() -> bool = c_has_egc() != 0
+// `TB_OPT_EGC`, so `tb_set_cell_ex` and `tb_extend_cell` are absent and are not bound.
+// `c/options.h` says why.
+has_egc() -> bool = c.has_egc() != 0
 
 // How many columns a codepoint occupies: 2 for most CJK and much emoji, 0 for a combining mark, 1 for
 // everything ordinary, and -1 for a codepoint that has no printed form at all.
@@ -777,104 +671,14 @@ has_egc() -> bool = c_has_egc() != 0
 // decides layout on the screen, so a program placing something beside a string it drew should ask
 // here. The two use different Unicode tables and can disagree at the edges; termbox's answer is the
 // one that was used to lay the cells out.
-wcwidth(ch: u32) -> int = c_wcwidth(ch)
+wcwidth(ch: u32) -> int = c.wcwidth(ch)
 
 // Whether a codepoint has a printed form. One that does not is drawn as U+FFFD.
-is_printable(ch: u32) -> bool = c_iswprint(ch) != 0
+is_printable(ch: u32) -> bool = c.iswprint(ch) != 0
 
 // The `errno` in effect when termbox last recorded one, which is the same number `Error.errno`
 // answers. Only some failures set it.
-last_errno() -> int = c_last_errno()
-
-// ==================================================================================================
-// The C
-// ==================================================================================================
-
-// Most of these are termbox's own symbols, named directly: an `extern` states the symbol it wants,
-// and a shim that only forwarded would be a second place for an argument order to be wrong. The
-// `sysl_tb_` ones are the three things C alone can reach -- the `#define`s, `struct tb_event`, and
-// `tb_print_ex`'s `size_t` out-parameter. `termbox2.c` says which is which and why.
-
-extern "tb_init" c_init() -> int
-extern "tb_init_file" c_init_file(path: *u8) -> int
-extern "tb_init_fd" c_init_fd(fd: int) -> int
-extern "tb_init_rwfd" c_init_rwfd(rfd: int, wfd: int) -> int
-extern "tb_shutdown" c_shutdown() -> int
-
-extern "tb_width" c_width() -> int
-extern "tb_height" c_height() -> int
-extern "tb_clear" c_clear() -> int
-extern "tb_set_clear_attrs" c_set_clear_attrs(fg: u64, bg: u64) -> int
-extern "tb_present" c_present() -> int
-extern "tb_invalidate" c_invalidate() -> int
-extern "tb_set_cursor" c_set_cursor(x: int, y: int) -> int
-extern "tb_hide_cursor" c_hide_cursor() -> int
-extern "tb_set_cell" c_set_cell(x: int, y: int, ch: u32, fg: u64, bg: u64) -> int
-extern "sysl_tb_send" c_send(buf: *u8, n: usize) -> int
-
-extern "tb_set_input_mode" c_set_input_mode(mode: int) -> int
-extern "tb_set_output_mode" c_set_output_mode(mode: int) -> int
-extern "tb_get_fds" c_get_fds(tty: *int, resize: *int) -> int
-
-extern "tb_last_errno" c_last_errno() -> int
-extern "tb_strerror" c_strerror(code: int) -> *u8
-extern "tb_has_truecolor" c_has_truecolor() -> int
-extern "tb_has_egc" c_has_egc() -> int
-extern "tb_attr_width" c_attr_width() -> int
-extern "tb_version" c_version() -> *u8
-extern "tb_iswprint" c_iswprint(ch: u32) -> int
-extern "tb_wcwidth" c_wcwidth(ch: u32) -> int
-
-extern "sysl_tb_error_ordinal" c_error_ordinal(code: int) -> int
-
-extern "sysl_tb_default" c_default() -> u64
-extern "sysl_tb_black" c_black() -> u64
-extern "sysl_tb_red" c_red() -> u64
-extern "sysl_tb_green" c_green() -> u64
-extern "sysl_tb_yellow" c_yellow() -> u64
-extern "sysl_tb_blue" c_blue() -> u64
-extern "sysl_tb_magenta" c_magenta() -> u64
-extern "sysl_tb_cyan" c_cyan() -> u64
-extern "sysl_tb_white" c_white() -> u64
-
-extern "sysl_tb_bold" c_bold() -> u64
-extern "sysl_tb_underline" c_underline() -> u64
-extern "sysl_tb_reverse" c_reverse() -> u64
-extern "sysl_tb_italic" c_italic() -> u64
-extern "sysl_tb_blink" c_blink() -> u64
-extern "sysl_tb_hi_black" c_hi_black() -> u64
-extern "sysl_tb_bright" c_bright() -> u64
-extern "sysl_tb_dim" c_dim() -> u64
-extern "sysl_tb_strikeout" c_strikeout() -> u64
-extern "sysl_tb_underline_2" c_underline_2() -> u64
-extern "sysl_tb_overline" c_overline() -> u64
-extern "sysl_tb_invisible" c_invisible() -> u64
-
-extern "sysl_tb_input_current" c_input_current() -> int
-extern "sysl_tb_input_value" c_input_value(alt: int, mouse: int) -> int
-extern "sysl_tb_input_is_alt" c_input_is_alt(mode: int) -> int
-extern "sysl_tb_input_has_mouse" c_input_has_mouse(mode: int) -> int
-
-extern "sysl_tb_output_current" c_output_current() -> int
-extern "sysl_tb_output_value" c_output_value(ordinal: int) -> int
-extern "sysl_tb_output_ordinal" c_output_ordinal(value: int) -> int
-
-extern "sysl_tb_event_ordinal" c_event_ordinal(kind: int) -> int
-extern "sysl_tb_key_ordinal" c_key_ordinal(key: int) -> int
-extern "sysl_tb_key_value" c_key_value(ordinal: int) -> int
-extern "sysl_tb_key_count" c_key_count() -> int
-
-extern "sysl_tb_mod_alt" c_mod_alt() -> u8
-extern "sysl_tb_mod_ctrl" c_mod_ctrl() -> u8
-extern "sysl_tb_mod_shift" c_mod_shift() -> u8
-extern "sysl_tb_mod_motion" c_mod_motion() -> u8
-
-extern "sysl_tb_poll_event" c_poll_event(t: *int, m: *int, k: *int, ch: *u32, w: *int, h: *int,
-                                         x: *int, y: *int) -> int
-extern "sysl_tb_peek_event" c_peek_event(timeout_ms: int, t: *int, m: *int, k: *int, ch: *u32,
-                                         w: *int, h: *int, x: *int, y: *int) -> int
-
-extern "sysl_tb_print" c_print(x: int, y: int, fg: u64, bg: u64, s: *u8, out_w: *u64) -> int
+last_errno() -> int = c.last_errno()
 
 // The bytes behind a `*u8` that C promises is NUL-terminated static storage, as a `string`.
 //

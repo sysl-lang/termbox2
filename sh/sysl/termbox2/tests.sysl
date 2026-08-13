@@ -1,6 +1,7 @@
 module sh.sysl.termbox2
 @tests
 
+import sysl.buf.{Buf, buf}
 import sysl.fs.{write_text, read_text, remove_file}
 import sysl.text.Search
 
@@ -21,17 +22,22 @@ import sysl.text.Search
 //
 // ==What IS covered, and why each case was chosen==
 //
-// The failures a binding has are not the failures a library has. A shim that dropped an argument,
-// transcribed a constant that is right on one platform, or paired two switches wrongly still
-// compiles, still links, and still answers something. So:
+// The failures a binding has are not the failures a library has. A shim that dropped an argument, or
+// a table whose two halves were paired wrongly, still compiles, still links, and still answers
+// something. So:
 //
 //   - **The compile-time options.** `TB_OPT_ATTR_W`, `TB_OPT_EGC` and `TB_OPT_LIBC_WCHAR` are
 //     `#define`s, invisible to the linker, and each of them changes what the library *is*. A test is
-//     the only thing that can notice one did not arrive.
-//   - **Both directions of every table.** The key table is two switches over one correspondence, so
-//     every ordinal is round-tripped through both -- which catches a case that is missing,
-//     duplicated, or paired with the wrong constant. A key value otherwise only arrives from a
-//     terminal somebody is typing at, so nothing else here could see it.
+//     the only thing that can notice one did not arrive. They matter twice over now: `c/options.h`
+//     is included by the implementation *and* by the translation unit the `c const` block is measured
+//     from, and the values of the style attributes depend on it.
+//   - **Both directions of every table.** `Key.code` and `Key.of` are two matches over one
+//     correspondence, so every variant is round-tripped through both -- which catches an arm that is
+//     missing or paired with the wrong constant. A key value otherwise only arrives from a terminal
+//     somebody is typing at, so nothing else here could see it.
+//   - **That the right C name was asked for.** A `c const` cannot hold a number no header defines,
+//     but it can perfectly well hold the wrong one -- so the keys whose values the header states
+//     outright are pinned against those statements.
 //   - **The error path across many entry points**, since that is the one path a program with no
 //     terminal can reach in full.
 //   - **What termbox actually wrote**, by pointing it at a file and reading the file back. That is
@@ -71,6 +77,10 @@ private done()
 // about it is visible to the linker, and a header compiled at 16 bits while this side assumed 64
 // would compile cleanly and pass the wrong number of bytes for every colour.
 //
+// It also decides the *values* of the twelve style attributes, and the `c const` block is measured
+// from a translation unit of its own -- so the second assertion below is what says that unit saw the
+// same option the implementation did.
+//
 // `tb_attr_width` reports what the header was actually compiled with, which is what makes the
 // mismatch findable at all. The second assertion is the same claim from the other end: `INVISIBLE`
 // only exists at 64 bits, and it does not fit in 32.
@@ -80,7 +90,7 @@ the_attribute_width_the_header_was_built_with_is_the_one_this_side_assumes() =
     assert(INVISIBLE > 0xffffffffu64, "a 64-bit-only attribute is above the 32-bit ones")
     assert(has_truecolor(), "truecolor follows from an attribute width of at least 32")
 
-// The other two options, both deliberate and both stated in `termbox2.c`.
+// The other two options, both deliberate and both stated in `c/options.h`.
 //
 // `has_egc` being false is what makes `tb_set_cell_ex` and `tb_extend_cell` absent from this binding
 // rather than merely unbound -- a reader who goes looking for them should find this.
@@ -149,49 +159,76 @@ rgb_packs_the_channels_where_truecolor_reads_them() =
 
 // -- The key table ---------------------------------------------------------------------------------
 
-// **Two switches over one correspondence, so every ordinal goes through both.**
+// **Two matches over one correspondence, so every variant goes through both.**
 //
 // This is the only test that can see the key table at all: a key value otherwise arrives from a
-// terminal somebody is typing at, and there is none here. A case that is missing, duplicated, or
-// paired with the wrong constant fails one of the three assertions below -- and each of those is a
-// mistake that compiles, links, and quietly reports the wrong key for the rest of the package's life.
+// terminal somebody is typing at, and there is none here. An arm that is missing or paired with the
+// wrong constant fails one of the assertions below -- and either is a mistake that compiles, links,
+// and quietly reports the wrong key for the rest of the package's life.
 //
-// The bound comes from the C rather than from a number written here, so adding a key cannot leave the
-// loop testing the old list.
+// **The bound comes from the enum itself**, by asking `try` for each ordinal until it has none, so
+// adding a key cannot leave the loop testing the old list. That used to be a C function reporting the
+// length of a hand-written list; now the list is the enum and nothing has to report anything.
 @test
-every_named_key_round_trips_through_both_switches() =
-    val n = c_key_count()
+every_named_key_round_trips_through_both_matches() =
+    var codes: Buf[int] = buf()
+    var i               = 0
 
-    assert(n > 60, "the table names the keys a terminal has")
+    while Key.try(i).is_some()
+        val k = Key.try(i).expect("the loop stops where the variants do")
 
-    for o in 0..<n
-        val code = c_key_value(o)
+        if k != UnknownKey then
+            val code = k.code().expect("every named key has a number")
 
-        assert(code >= 0, "every ordinal below the count names a key")
-        assert_eq(c_key_ordinal(code), o)
+            assert_eq(Key.of(code), k)
 
-        for p in 0..<o
-            assert(c_key_value(p) != code, "and no two ordinals name the same key")
+            for j in 0..<codes.len()
+                assert(codes[j] != code, "and no two of them are the same number")
 
-// A value no key has answers `UnknownKey` rather than landing on whichever case a fall-through would
+            codes.push(code)
+
+        i += 1
+
+    assert(codes.len() > 60, "the table names the keys a terminal has")
+    assert_eq(int(codes.len()), i - 1)   // every variant but `UnknownKey` named a number
+
+// A value no key has answers `UnknownKey` rather than landing on whichever arm a fall-through would
 // have reached. `!` is an ordinary printable character, which arrives in `Event.ch` and never in
 // `Event.key`, so it is exactly the sort of number that must not be named.
 @test
 a_key_value_the_table_does_not_name_is_unknown() =
-    assert_eq(c_key_ordinal(0x21), c_key_count())
-    assert_eq(c_key_ordinal(0x1000), c_key_count())
-    assert(key_code(UnknownKey).is_none(), "and `UnknownKey` has no code to answer with")
+    assert_eq(Key.of(0x21), UnknownKey)
+    assert_eq(Key.of(0x1000), UnknownKey)
+    assert(UnknownKey.code().is_none(), "and `UnknownKey` has no code to answer with")
 
-// The public inverse, on the two shapes of key: one from the ASCII range and one the terminal
-// synthesizes. Escape's code is shared with Ctrl-3 and Ctrl-[, which is why `Esc` is the name kept.
+// The inverse, on the two shapes of key: one from the ASCII range and one the terminal synthesizes.
+// Escape's code is shared with Ctrl-3 and Ctrl-[, which is why `Esc` is the name kept.
 @test
 key_code_answers_what_an_event_would_have_carried() =
-    val esc = key_code(Esc).expect("Escape has a code")
-    val up  = key_code(Up).expect("the up arrow has a code")
+    val esc = Esc.code().expect("Escape has a code")
+    val up  = Up.code().expect("the up arrow has a code")
 
     assert(esc < 0x80, "an ASCII key is the byte the terminal sent")
     assert(up > 0xff, "and a terminal-dependent one is above every byte")
     assert(esc != up, "which are not the same number")
+
+// **That the right C name was asked for, which no round trip can tell.** `code` and `of` agree
+// perfectly if a variant is paired with the wrong `c const` in *both* of them, and `c const` only
+// promises the number is whatever the header says for the name written down -- so these are the
+// numbers `termbox2.h` states outright, checked against it.
+//
+// The function keys and the arrows are counted down from `0xffff`, which is the header's own way of
+// keeping them clear of every byte a terminal can send.
+@test
+the_keys_the_header_gives_a_number_have_that_number() =
+    assert_eq(Nul.code().expect("Ctrl-Space has a code"), 0x00)
+    assert_eq(Esc.code().expect("Escape has a code"), 0x1b)
+    assert_eq(Space.code().expect("the space bar has a code"), 0x20)
+    assert_eq(Backspace2.code().expect("the backspace key has a code"), 0x7f)
+    assert_eq(F1.code().expect("F1 has a code"), 0xffff)
+    assert_eq(Up.code().expect("the up arrow has a code"), 0xffff - 18)
+    assert_eq(BackTab.code().expect("Shift-Tab has a code"), 0xffff - 22)
+    assert_eq(MouseLeft.code().expect("the left button has a code"), 0xffff - 23)
 
 // -- Errors ------------------------------------------------------------------------------------------
 

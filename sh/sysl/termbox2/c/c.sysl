@@ -1,0 +1,267 @@
+// termbox2 as C declares it, and the numbers its header computes.
+//
+// **Everything that is C lives in this directory** — `termbox2.h`, the `options.h` that fixes its
+// compile-time options, the one `.c` file that compiles the implementation, and this file of
+// declarations over them. Nothing here is meant to be called by a program: every name and every
+// convention is C's, so an error is a negative `int`, a colour is a bare `u64` of bits, and a string
+// is a pointer somebody else owns. The module above this one turns those into sysl and is what an
+// application imports.
+//
+// The split keeps two jobs apart. This one has to be **faithful** — a signature that disagrees with
+// the header links perfectly and corrupts the call at run time, and nothing in this arrangement
+// checks one against the other, so each declaration below was read out of `termbox2.h` rather than
+// remembered. The other one has to be **pleasant**, which is a different question and would otherwise
+// be answered in the same breath.
+//
+// ==Why there are so few functions here that are not termbox's own==
+//
+// Three of these are shims and the rest are termbox's own symbols, named directly. That ratio is what
+// `c const` bought: this package used to carry a C function per `#define` — twenty-one colours and
+// attributes, four modifier masks, the input-mode bits — and four hand-written tables pairing
+// termbox's constants with the declaration order of an enum in the module above, with nothing
+// comparing the two halves. All of it is below as constants the C compiler works out and matches
+// written in sysl.
+//
+// **A consumer may import this module**, and there is nothing wrong with doing so: a program that
+// wants termbox's own spelling, or a constant the pleasant layer does not re-export, should reach for
+// `c.` and be visibly dropping into C where it does.
+
+module sh.sysl.termbox2.c
+
+// **`options.h` rather than `termbox2.h`, and that is load-bearing.** `TB_OPT_ATTR_W` decides the
+// values of the twelve style attributes as well as the width of `uintattr_t` — `TB_BOLD` is `0x0100`
+// at width 16 and `0x01000000` above it, and four of them are not defined at all below 64. The block
+// below is measured from a probe translation unit of the compiler's own making (`15 §7`), which is a
+// *second* file including this header, so it has to be handed the same options the implementation was
+// or it would measure numbers termbox does not use. `options.h` is where they are written, once.
+@include("options.h")
+
+// ## The numbers, asked for rather than written down
+//
+// Each of these is what the C compiler computes for termbox's own name, out of the header beside this
+// file, on the target being built. `15 §7` calls a transcribed constant "correct on one machine" with
+// "nothing checking it"; every one of these was reached through a C function returning it until
+// `c const` arrived, which was the same thing at one remove — a value that has no value until the
+// program runs, so it could not size an array, stand in a `match` arm, or be folded into a bound.
+//
+// It is free here, because the header is vendored: there is no include path for a consumer to pass
+// and nothing to install.
+
+// The eight colours a terminal has had since the 1970s, plus `TB_DEFAULT`, which sends no colour code
+// at all. What the numbers mean depends on the output mode.
+c const
+    DEFAULT: u64 = "TB_DEFAULT"
+    BLACK:   u64 = "TB_BLACK"
+    RED:     u64 = "TB_RED"
+    GREEN:   u64 = "TB_GREEN"
+    YELLOW:  u64 = "TB_YELLOW"
+    BLUE:    u64 = "TB_BLUE"
+    MAGENTA: u64 = "TB_MAGENTA"
+    CYAN:    u64 = "TB_CYAN"
+    WHITE:   u64 = "TB_WHITE"
+
+// Style attributes, bitwise-or'd onto a colour. **The last four exist only at `TB_OPT_ATTR_W 64`**,
+// which is what `options.h` sets — at the default width of 16 they are not defined and this block
+// would be refused, naming the one that is missing.
+c const
+    BOLD:        u64 = "TB_BOLD"
+    UNDERLINE:   u64 = "TB_UNDERLINE"
+    REVERSE:     u64 = "TB_REVERSE"
+    ITALIC:      u64 = "TB_ITALIC"
+    BLINK:       u64 = "TB_BLINK"
+    HI_BLACK:    u64 = "TB_HI_BLACK"
+    BRIGHT:      u64 = "TB_BRIGHT"
+    DIM:         u64 = "TB_DIM"
+    STRIKEOUT:   u64 = "TB_STRIKEOUT"
+    UNDERLINE_2: u64 = "TB_UNDERLINE_2"
+    OVERLINE:    u64 = "TB_OVERLINE"
+    INVISIBLE:   u64 = "TB_INVISIBLE"
+
+// Every failure termbox names. All are negative, which is what makes a single sign test the whole of
+// the error handling in the module above; `TB_OK` is zero and needs no name here.
+c const
+    ERR:                  int = "TB_ERR"
+    ERR_NEED_MORE:        int = "TB_ERR_NEED_MORE"
+    ERR_INIT_ALREADY:     int = "TB_ERR_INIT_ALREADY"
+    ERR_INIT_OPEN:        int = "TB_ERR_INIT_OPEN"
+    ERR_MEM:              int = "TB_ERR_MEM"
+    ERR_NO_EVENT:         int = "TB_ERR_NO_EVENT"
+    ERR_NO_TERM:          int = "TB_ERR_NO_TERM"
+    ERR_NOT_INIT:         int = "TB_ERR_NOT_INIT"
+    ERR_OUT_OF_BOUNDS:    int = "TB_ERR_OUT_OF_BOUNDS"
+    ERR_READ:             int = "TB_ERR_READ"
+    ERR_RESIZE_IOCTL:     int = "TB_ERR_RESIZE_IOCTL"
+    ERR_RESIZE_PIPE:      int = "TB_ERR_RESIZE_PIPE"
+    ERR_RESIZE_SIGACTION: int = "TB_ERR_RESIZE_SIGACTION"
+    ERR_POLL:             int = "TB_ERR_POLL"
+    ERR_TCGETATTR:        int = "TB_ERR_TCGETATTR"
+    ERR_TCSETATTR:        int = "TB_ERR_TCSETATTR"
+    ERR_UNSUPPORTED_TERM: int = "TB_ERR_UNSUPPORTED_TERM"
+    ERR_RESIZE_WRITE:     int = "TB_ERR_RESIZE_WRITE"
+    ERR_RESIZE_POLL:      int = "TB_ERR_RESIZE_POLL"
+    ERR_RESIZE_READ:      int = "TB_ERR_RESIZE_READ"
+    ERR_RESIZE_SSCANF:    int = "TB_ERR_RESIZE_SSCANF"
+    ERR_CAP_COLLISION:    int = "TB_ERR_CAP_COLLISION"
+
+// Input mode is a **bitmask**, and `INPUT_CURRENT` is the value that asks `tb_set_input_mode` to
+// report rather than change. `INPUT_ESC` and `INPUT_ALT` are alternatives: termbox states the rule
+// and does not enforce it, so asking for both behaves as if only `ESC` had been asked for.
+c const
+    INPUT_CURRENT: int = "TB_INPUT_CURRENT"
+    INPUT_ESC:     int = "TB_INPUT_ESC"
+    INPUT_ALT:     int = "TB_INPUT_ALT"
+    INPUT_MOUSE:   int = "TB_INPUT_MOUSE"
+
+// Output mode is an **enumeration** rather than a mask, and `OUTPUT_CURRENT` reports as above.
+c const
+    OUTPUT_CURRENT:   int = "TB_OUTPUT_CURRENT"
+    OUTPUT_NORMAL:    int = "TB_OUTPUT_NORMAL"
+    OUTPUT_256:       int = "TB_OUTPUT_256"
+    OUTPUT_216:       int = "TB_OUTPUT_216"
+    OUTPUT_GRAYSCALE: int = "TB_OUTPUT_GRAYSCALE"
+    OUTPUT_TRUECOLOR: int = "TB_OUTPUT_TRUECOLOR"
+
+// What kind of thing an event is, and the modifier bits it carries. The modifiers are a mask, so
+// several are true at once and they stay numbers rather than becoming an enumeration.
+c const
+    EVENT_KEY:    int = "TB_EVENT_KEY"
+    EVENT_RESIZE: int = "TB_EVENT_RESIZE"
+    EVENT_MOUSE:  int = "TB_EVENT_MOUSE"
+
+c const
+    MOD_ALT:    u8 = "TB_MOD_ALT"
+    MOD_CTRL:   u8 = "TB_MOD_CTRL"
+    MOD_SHIFT:  u8 = "TB_MOD_SHIFT"
+    MOD_MOTION: u8 = "TB_MOD_MOTION"
+
+// The named keys, under termbox's own spellings.
+//
+// **Several of these are the same number**, because the terminal sends one byte for what the reader
+// thinks are two keys: `KEY_CTRL_H` and `KEY_BACKSPACE` are both 0x08, `KEY_CTRL_I` and `KEY_TAB`
+// both 0x09, `KEY_CTRL_M` and `KEY_ENTER` both 0x0d, and `KEY_CTRL_3`, `KEY_CTRL_LSQ_BRACKET` and
+// `KEY_ESC` are all 0x1b. Only the names the module above uses are asked for here, which is why the
+// aliases are absent: **a `match` may not name one value twice** (`09 §2`), so asking for both
+// spellings and matching on both would be refused — by the sysl compiler, which is an improvement on
+// the C `switch` that quietly took the first.
+c const
+    KEY_CTRL_TILDE:       int = "TB_KEY_CTRL_TILDE"
+    KEY_CTRL_A:           int = "TB_KEY_CTRL_A"
+    KEY_CTRL_B:           int = "TB_KEY_CTRL_B"
+    KEY_CTRL_C:           int = "TB_KEY_CTRL_C"
+    KEY_CTRL_D:           int = "TB_KEY_CTRL_D"
+    KEY_CTRL_E:           int = "TB_KEY_CTRL_E"
+    KEY_CTRL_F:           int = "TB_KEY_CTRL_F"
+    KEY_CTRL_G:           int = "TB_KEY_CTRL_G"
+    KEY_BACKSPACE:        int = "TB_KEY_BACKSPACE"
+    KEY_TAB:              int = "TB_KEY_TAB"
+    KEY_CTRL_J:           int = "TB_KEY_CTRL_J"
+    KEY_CTRL_K:           int = "TB_KEY_CTRL_K"
+    KEY_CTRL_L:           int = "TB_KEY_CTRL_L"
+    KEY_ENTER:            int = "TB_KEY_ENTER"
+    KEY_CTRL_N:           int = "TB_KEY_CTRL_N"
+    KEY_CTRL_O:           int = "TB_KEY_CTRL_O"
+    KEY_CTRL_P:           int = "TB_KEY_CTRL_P"
+    KEY_CTRL_Q:           int = "TB_KEY_CTRL_Q"
+    KEY_CTRL_R:           int = "TB_KEY_CTRL_R"
+    KEY_CTRL_S:           int = "TB_KEY_CTRL_S"
+    KEY_CTRL_T:           int = "TB_KEY_CTRL_T"
+    KEY_CTRL_U:           int = "TB_KEY_CTRL_U"
+    KEY_CTRL_V:           int = "TB_KEY_CTRL_V"
+    KEY_CTRL_W:           int = "TB_KEY_CTRL_W"
+    KEY_CTRL_X:           int = "TB_KEY_CTRL_X"
+    KEY_CTRL_Y:           int = "TB_KEY_CTRL_Y"
+    KEY_CTRL_Z:           int = "TB_KEY_CTRL_Z"
+    KEY_ESC:              int = "TB_KEY_ESC"
+    KEY_CTRL_BACKSLASH:   int = "TB_KEY_CTRL_BACKSLASH"
+    KEY_CTRL_RSQ_BRACKET: int = "TB_KEY_CTRL_RSQ_BRACKET"
+    KEY_CTRL_6:           int = "TB_KEY_CTRL_6"
+    KEY_CTRL_SLASH:       int = "TB_KEY_CTRL_SLASH"
+    KEY_SPACE:            int = "TB_KEY_SPACE"
+    KEY_BACKSPACE2:       int = "TB_KEY_BACKSPACE2"
+    KEY_F1:               int = "TB_KEY_F1"
+    KEY_F2:               int = "TB_KEY_F2"
+    KEY_F3:               int = "TB_KEY_F3"
+    KEY_F4:               int = "TB_KEY_F4"
+    KEY_F5:               int = "TB_KEY_F5"
+    KEY_F6:               int = "TB_KEY_F6"
+    KEY_F7:               int = "TB_KEY_F7"
+    KEY_F8:               int = "TB_KEY_F8"
+    KEY_F9:               int = "TB_KEY_F9"
+    KEY_F10:              int = "TB_KEY_F10"
+    KEY_F11:              int = "TB_KEY_F11"
+    KEY_F12:              int = "TB_KEY_F12"
+    KEY_INSERT:           int = "TB_KEY_INSERT"
+    KEY_DELETE:           int = "TB_KEY_DELETE"
+    KEY_HOME:             int = "TB_KEY_HOME"
+    KEY_END:              int = "TB_KEY_END"
+    KEY_PGUP:             int = "TB_KEY_PGUP"
+    KEY_PGDN:             int = "TB_KEY_PGDN"
+    KEY_ARROW_UP:         int = "TB_KEY_ARROW_UP"
+    KEY_ARROW_DOWN:       int = "TB_KEY_ARROW_DOWN"
+    KEY_ARROW_LEFT:       int = "TB_KEY_ARROW_LEFT"
+    KEY_ARROW_RIGHT:      int = "TB_KEY_ARROW_RIGHT"
+    KEY_BACK_TAB:         int = "TB_KEY_BACK_TAB"
+    KEY_MOUSE_LEFT:       int = "TB_KEY_MOUSE_LEFT"
+    KEY_MOUSE_RIGHT:      int = "TB_KEY_MOUSE_RIGHT"
+    KEY_MOUSE_MIDDLE:     int = "TB_KEY_MOUSE_MIDDLE"
+    KEY_MOUSE_RELEASE:    int = "TB_KEY_MOUSE_RELEASE"
+    KEY_MOUSE_WHEEL_UP:   int = "TB_KEY_MOUSE_WHEEL_UP"
+    KEY_MOUSE_WHEEL_DOWN: int = "TB_KEY_MOUSE_WHEEL_DOWN"
+
+// ## Starting and stopping
+
+extern "tb_init" init() -> int
+extern "tb_init_file" init_file(path: *u8) -> int
+extern "tb_init_fd" init_fd(fd: int) -> int
+extern "tb_init_rwfd" init_rwfd(rfd: int, wfd: int) -> int
+extern "tb_shutdown" shutdown() -> int
+
+// ## The screen
+
+extern "tb_width" width() -> int
+extern "tb_height" height() -> int
+extern "tb_clear" clear() -> int
+extern "tb_set_clear_attrs" set_clear_attrs(fg: u64, bg: u64) -> int
+extern "tb_present" present() -> int
+extern "tb_invalidate" invalidate() -> int
+extern "tb_set_cursor" set_cursor(x: int, y: int) -> int
+extern "tb_hide_cursor" hide_cursor() -> int
+
+// `fg` and `bg` are `uintattr_t`, which `options.h` makes `uint64_t`. `attr_width` reports the same
+// width at run time and the tests assert the two agree, which is the only thing standing between a
+// mismatch and a silent one.
+extern "tb_set_cell" set_cell(x: int, y: int, ch: u32, fg: u64, bg: u64) -> int
+
+// ## Modes
+
+// One entry point sets and reports, told apart by being handed `INPUT_CURRENT`. Both answer the mode
+// now in effect, or a negative failure.
+extern "tb_set_input_mode" set_input_mode(mode: int) -> int
+extern "tb_set_output_mode" set_output_mode(mode: int) -> int
+
+// ## What was built, and what the terminal can do
+
+extern "tb_get_fds" get_fds(tty: *int, resize: *int) -> int
+extern "tb_last_errno" last_errno() -> int
+extern "tb_strerror" strerror(code: int) -> *u8
+extern "tb_has_truecolor" has_truecolor() -> int
+extern "tb_has_egc" has_egc() -> int
+extern "tb_attr_width" attr_width() -> int
+extern "tb_version" version() -> *u8
+extern "tb_iswprint" iswprint(ch: u32) -> int
+extern "tb_wcwidth" wcwidth(ch: u32) -> int
+
+// ## The three shims
+//
+// `termbox2.c` says why each of these cannot be an `extern` on termbox's own symbol: two are about a
+// layout only the header knows, and `send` is a deliberate divergence from upstream that needs a
+// macro of termbox's own.
+
+extern "sysl_tb_poll_event" poll_event(t: *int, m: *int, k: *int, ch: *u32, w: *int, h: *int,
+                                       x: *int, y: *int) -> int
+extern "sysl_tb_peek_event" peek_event(timeout_ms: int, t: *int, m: *int, k: *int, ch: *u32,
+                                       w: *int, h: *int, x: *int, y: *int) -> int
+
+extern "sysl_tb_send" send(buf: *u8, n: usize) -> int
+
+extern "sysl_tb_print" print_ex(x: int, y: int, fg: u64, bg: u64, s: *u8, out_w: *u64) -> int
