@@ -3,6 +3,8 @@
 A full-screen terminal interface for [sysl](https://github.com/sysl-lang/sysl) — cells, colours,
 keys and the mouse, from a single header carried in the package.
 
+*An independent sysl package for termbox2. It is not affiliated with or endorsed by termbox2's authors or trademark holders.*
+
 **Nothing has to be installed to use this.** termbox2 is a single-header library and this package
 carries the header: sysl compiles a library's C as part of the build, so there is no `-l` flag, no
 `pkg-config`, and no build script anywhere in this repository. That is also why there is no `@link`
