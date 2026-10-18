@@ -2,7 +2,7 @@ module sh.sysl.termbox2
 @tests
 
 import sysl.buf.{Buf, buf}
-import sysl.fs.{write_text, read_text, remove_file}
+import sysl.fs.{make_temp_dir, read_text, remove_dir_all, write_text}
 import sysl.text.Search
 
 // What this binding claims, run by `sysl test .`.
@@ -56,9 +56,18 @@ extern "setenv" c_setenv(name: *u8, value: *u8, overwrite: int) -> int
 
 private with_term() = c_setenv(c"TERM", c"xterm", 1)
 
-// Where the write-through test points termbox. Nothing else reads it, and every test that makes it
-// removes it.
-private scratch() -> string = "/tmp/sysl-termbox2-test.out"
+// Where a test points termbox: a file in a directory of the test's own, made the first time the test
+// asks, since `sysl test` runs tests several at once and two sharing one file would read each other's
+// bytes. Every test that makes it removes it (`scratch_gone`).
+private var scratch_dir: string = ""
+
+private scratch() -> string
+    if scratch_dir == ""
+        scratch_dir = make_temp_dir("sysl-termbox2").expect("a scratch directory can be made")
+
+    s"$scratch_dir/out"
+
+private scratch_gone() = remove_dir_all(scratch_dir).expect("the scratch file can be removed")
 
 // A headless termbox, initialized against an ordinary file, which is the only kind of `init` a suite
 // can make. The file has to exist first, because `init_file` opens rather than creates.
@@ -69,7 +78,7 @@ private headless()
 
 private done()
     shutdown().expect("termbox shuts down")
-    remove_file(scratch()).expect("the scratch file can be removed")
+    scratch_gone()
 
 // -- The compile-time options ----------------------------------------------------------------------
 
@@ -356,7 +365,7 @@ what_was_sent_is_on_the_far_end_of_the_descriptor() =
 
     val written = read_text(scratch()).expect("the file can be read back")
 
-    remove_file(scratch()).expect("the scratch file can be removed")
+    scratch_gone()
 
     assert(written.contains("hello, terminal"), "the bytes sent are the bytes written")
     assert(written.contains("\u{1b}["), "and termbox wrote escape sequences of its own around them")
