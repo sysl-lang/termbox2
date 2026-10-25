@@ -20,7 +20,7 @@ sh/sysl/termbox2/
         termbox2.c      the implementation, and what only C can reach
         options.h       the compile-time options, in the one place everything goes through
         termbox2.h      vendored from termbox/termbox2
-package.hocon           who this package is, and what it needs of the machine
+sysl.hocon              who this package is, and what it needs of the machine
 ```
 
 The module is **`sh.sysl.termbox2`**, and the directories are that name: a dotted module name mirrors
@@ -38,16 +38,16 @@ then reads as dropping into C on purpose.
 
 ## Using it
 
-Name it in your project's `package.hocon` and `sysl build` fetches it:
+Name it in your project's `sysl.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.2.0" }
+  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.2.1" }
 }
 ```
 
 The coordinate is an identity rather than a URL, so it carries no `https://`, and `version` is the
-tag `v0.2.0` here.
+tag `v0.2.1` here.
 
 Or point at it directly, which needs no fetching and is what this repository's own tests do. Either a
 built artifact or the source tree works, and they are the same road:
