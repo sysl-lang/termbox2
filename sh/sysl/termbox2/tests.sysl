@@ -3,7 +3,7 @@ module sh.sysl.termbox2
 
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_text, remove_dir_all, write_text}
-import sysl.text.{Search, from_utf8_lossy, grapheme_columns}
+import sysl.text.{Search, from_utf8_lossy, grapheme_columns, repeat}
 
 // What this binding claims, run by `sysl test .`.
 //
@@ -629,3 +629,308 @@ the_cluster_calls_report_out_of_bounds_and_not_init() =
     assert_eq(cluster_at(0, 4).unwrap_err().kind(), OutOfBounds)
 
     leave(p)
+
+// -- Bracketed paste, on a pseudo-terminal ---------------------------------------------------------------
+//
+// What the reader types or pastes is written into the master end, which is exactly where a terminal
+// emulator writes it, and the events termbox makes of it are read back with `poll_event`. termbox reads
+// at most 64 bytes at a time, so anything longer arrives in several reads whatever the test does.
+
+extern "write" c_write(fd: int, buf: *u8, n: usize) -> isize
+
+private val OPEN = "\u{1b}[200~"
+private val CLOSE = "\u{1b}[201~"
+
+private feed(p: Pty, s: string) = assert_eq(c_write(p.master, &s.bytes[0], s.len), isize(s.len))
+
+private bracketed(text: string) -> string = OPEN + text + CLOSE
+
+private next() -> Event = poll_event().expect("an event arrives")
+
+// Nothing to report yet: the bytes so far stop inside a paste.
+private nothing_yet() = assert(peek_event(20).expect("a peek").is_none(), "no event before the end marker")
+
+private paste_of(ev: Event) -> string
+    assert_eq(ev.kind, Paste)
+
+    ev.text
+end paste_of
+
+private typed(ev: Event, ch: char)
+    assert_eq(ev.kind, Keyboard)
+    assert_eq(ev.ch, u32(ch))
+
+// Everything the terminal was sent so far contains `s`. Blocks until it does, so it is asked only for
+// bytes that a flush has already written.
+private heard(p: Pty, s: string)
+    var raw: [256]u8 = [0; 256]
+    var got = ""
+
+    while !got.contains(s)
+        val n = c_read(p.master, &raw[0], 256)
+
+        assert(n > 0, "the terminal has more to read")
+        got = got + from_utf8_lossy(raw[..<usize(n)])
+end heard
+
+// **Off by default**, so a program that never asks sees what it always saw: the opening marker is
+// Escape followed by typing, which is the finding that started this.
+@test
+bracketed_paste_is_off_by_default_and_the_markers_arrive_as_keys() =
+    val p = screen()
+
+    feed(p, bracketed("XY"))
+
+    assert_eq(next().key, Esc)
+    typed(next(), '[')
+    typed(next(), '2')
+    typed(next(), '0')
+    typed(next(), '0')
+    typed(next(), '~')
+    typed(next(), 'X')
+
+    leave(p)
+
+@test
+enabling_tells_the_terminal_and_a_paste_is_one_event() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("bracketed paste turns on")
+    heard(p, "\u{1b}[?2004h")
+
+    feed(p, bracketed("hello\nworld\tand a tab\r\n"))
+
+    val ev = next()
+
+    assert_eq(paste_of(ev), "hello\nworld\tand a tab\r\n")
+    assert_eq(ev.key, Nul)
+    assert_eq(ev.ch, 0)
+    assert_eq(ev.mods, 0)
+    assert_eq(ev.kind.name(), "Paste")
+
+    leave(p)
+
+// Keys on either side of a paste, in the same write, keep their order and their meaning -- an arrow
+// key's sequence is still an arrow key outside the markers.
+@test
+keys_before_and_after_a_paste_are_unaffected() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+    feed(p, "a\u{1b}[A" + bracketed("mid") + "b\u{1b}[A\r")
+
+    typed(next(), 'a')
+    assert_eq(next().key, Up)
+    assert_eq(paste_of(next()), "mid")
+    typed(next(), 'b')
+    assert_eq(next().key, Up)
+    assert_eq(next().key, Enter)
+
+    leave(p)
+
+// Inside the markers nothing is a key: a lone Escape, an arrow key's sequence, and a near miss of the
+// closing marker are all text, and an Escape directly before the real closing marker is too.
+@test
+a_paste_holding_escapes_is_text() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+
+    val inner = "x\u{1b}y\u{1b}[A\u{1b}[201z\u{1b}[200~\u{1b}"
+
+    feed(p, bracketed(inner))
+
+    assert_eq(paste_of(next()), inner)
+
+    leave(p)
+
+@test
+an_empty_paste_and_two_pastes_in_one_read_are_each_one_event() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+    feed(p, bracketed("") + bracketed("first") + bracketed("second"))
+
+    assert_eq(paste_of(next()), "")
+    assert_eq(paste_of(next()), "first")
+    assert_eq(paste_of(next()), "second")
+
+    leave(p)
+
+// The end marker comes in a later write, and so does half of it: `peek_event` reports nothing while
+// the paste is open and keeps what it has read.
+@test
+a_paste_split_across_writes_waits_for_its_end_marker() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+
+    feed(p, OPEN + "one ")
+    nothing_yet()
+    feed(p, "two\n\u{1b}[20")
+    nothing_yet()
+    feed(p, "1~z")
+
+    assert_eq(paste_of(next()), "one two\n")
+    typed(next(), 'z')
+
+    leave(p)
+
+// The opening marker split in two is still an opening marker, not Escape and typing.
+@test
+an_opening_marker_split_across_writes_still_opens_a_paste() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+
+    feed(p, "\u{1b}[20")
+    nothing_yet()
+    feed(p, "0~x" + CLOSE)
+
+    assert_eq(paste_of(next()), "x")
+
+    leave(p)
+
+// One write of 63 typed bytes and a paste: termbox's first read ends on the paste's Escape, which in
+// `ESC` mode termbox would report as the Escape key without asking anything else.
+@test
+an_opening_marker_split_by_a_read_boundary_still_opens_a_paste() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+    feed(p, repeat("a", 63) + bracketed("hi"))
+
+    for _ in 0..<63
+        typed(next(), 'a')
+
+    assert_eq(paste_of(next()), "hi")
+
+    leave(p)
+
+// `poll_event` waits through every read a paste takes: four hundred bytes are seven of termbox's.
+@test
+poll_waits_through_the_reads_a_paste_takes() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+
+    val text = repeat("0123456789\n", 36)
+
+    feed(p, bracketed(text) + "q")
+
+    assert_eq(paste_of(next()), text)
+    typed(next(), 'q')
+
+    leave(p)
+
+// A mebibyte, written the way a terminal hands a long paste over: in pieces, with the program reading
+// between them. The search for the end marker resumes where it stopped, so this is linear; searching
+// from the start at every 64-byte read would be eight thousand times the work.
+@test
+a_large_paste_arrives_whole() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+
+    val text = repeat("the quick brown fox \u{1b}[A jumps\n", 32768)
+    val whole = bracketed(text)
+    var at: usize = 0
+
+    while at < whole.len
+        val end = if at + 512 < whole.len then at + 512 else whole.len
+
+        feed(p, whole[at..<end])
+        at = end
+
+        if at < whole.len then assert(peek_event(1).expect("a peek").is_none(), "still open")
+
+    assert_eq(paste_of(next()), text)
+
+    leave(p)
+
+// Bytes that are not UTF-8 are still delivered, as U+FFFD, rather than losing the paste.
+@test
+a_paste_with_bytes_that_are_not_utf8_arrives_with_replacements() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+
+    var raw: [14]u8 = [0x1b, '[', '2', '0', '0', '~', 0xff, 'a', 0x1b, '[', '2', '0', '1', '~']
+
+    assert_eq(c_write(p.master, &raw[0], 14), 14)
+    assert_eq(paste_of(next()), "\u{fffd}a")
+
+    leave(p)
+
+// In `alt` mode an Escape before a key is a modifier, and a paste is still a paste.
+@test
+a_paste_in_alt_mode_with_mouse_on_is_still_one_event() =
+    val p = screen()
+
+    set_input_mode(InputMode(true, true)).expect("alt and mouse")
+    enable_bracketed_paste().expect("on")
+    feed(p, "\u{1b}x" + bracketed("p\u{1b}q"))
+
+    val alt_x = next()
+
+    typed(alt_x, 'x')
+    assert(alt_x.alt(), "Escape before a key is Alt")
+    assert_eq(paste_of(next()), "p\u{1b}q")
+
+    leave(p)
+
+@test
+disabling_tells_the_terminal_and_a_paste_is_typing_again() =
+    val p = screen()
+
+    enable_bracketed_paste().expect("on")
+    disable_bracketed_paste().expect("and off")
+    heard(p, "\u{1b}[?2004l")
+
+    feed(p, bracketed("k"))
+
+    assert_eq(next().key, Esc)
+    typed(next(), '[')
+
+    leave(p)
+
+// `shutdown` turns bracketed paste off, so the shell the program returns to is not left receiving
+// markers -- and a program that never turned it on sends nothing about it at all.
+@test
+shutdown_turns_bracketed_paste_off_and_only_if_it_was_on() =
+    headless()
+    enable_bracketed_paste().expect("on")
+    shutdown().expect("termbox shuts down")
+
+    val on = read_text(scratch()).expect("the terminal's bytes")
+
+    assert(on.contains("\u{1b}[?2004h"), "turned on")
+    assert(on.contains("\u{1b}[?2004l"), "and off again at shutdown")
+    assert(on.index_of("\u{1b}[?2004h").unwrap() < on.index_of("\u{1b}[?2004l").unwrap(), "in that order")
+
+    headless()
+    shutdown().expect("termbox shuts down")
+
+    assert(!read_text(scratch()).expect("the bytes").contains("?2004"), "never mentioned when never on")
+
+    scratch_gone()
+
+// A second session starts with it off again, whatever the first did.
+@test
+a_new_session_starts_with_bracketed_paste_off() =
+    val first = screen()
+
+    enable_bracketed_paste().expect("on")
+    leave(first)
+
+    val p = screen()
+
+    feed(p, bracketed("k"))
+    assert_eq(next().key, Esc)
+
+    leave(p)
+
+@test
+bracketed_paste_before_init_is_not_init() =
+    assert_eq(enable_bracketed_paste().unwrap_err().kind(), NotInit)
+    assert_eq(disable_bracketed_paste().unwrap_err().kind(), NotInit)

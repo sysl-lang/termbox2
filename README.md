@@ -14,9 +14,9 @@ in the binding's header — there is no external library to name.
 sh/sysl/termbox2/
     termbox2.sysl       the binding
     keys.sysl           the named keys, and the numbers termbox reports for them
-    tests.sysl          22 tests, none of which needs a terminal
+    tests.sysl          49 tests, none of which needs a terminal
     c/
-        c.sysl          termbox as C declares it: the constants, the externs, the three shims
+        c.sysl          termbox as C declares it: the constants, the externs, the shims
         termbox2.c      the implementation, and what only C can reach
         options.h       the compile-time options, in the one place everything goes through
         termbox2.h      vendored from termbox/termbox2
@@ -42,12 +42,12 @@ Name it in your project's `sysl.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.3.0" }
+  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.4.0" }
 }
 ```
 
 The coordinate is an identity rather than a URL, so it carries no `https://`, and `version` is the
-tag `v0.3.0` here.
+tag `v0.4.0` here.
 
 Or point at it directly, which needs no fetching and is what this repository's own tests do. Either a
 built artifact or the source tree works, and they are the same road:
@@ -105,6 +105,7 @@ main() -> Result[unit, Error]
                     said = f"you typed U+${ev.ch}%04X"
                 else
                     said = f"you pressed ${ev.key}"
+            Paste    -> said = f"you pasted ${ev.text.len} bytes"
             UnknownEvent -> said = "something termbox had no name for"
 
     shutdown()
@@ -133,6 +134,7 @@ send(bytes)                             // raw, around the cell buffer
 
 set_input_mode(InputMode) / input_mode()
 set_output_mode(OutputMode) / output_mode()
+enable_bracketed_paste() / disable_bracketed_paste()   // a paste arrives as one `Paste` event
 
 poll_event() -> Event
 peek_event(timeout_ms) -> Option[Event]
@@ -186,13 +188,36 @@ almost nowhere.
 key elsewhere arrives as a `Ctrl*` variant rather than as a modifier, which is the terminal's doing
 and not termbox's.
 
+### A paste is one event, once asked for
+
+```sysl
+init()?
+enable_bracketed_paste()?
+
+val ev = poll_event()?
+
+if ev.kind == Paste then insert(ev.text)
+```
+
+**Without it, a paste is typing**: every character arrives as a `Keyboard` event, so a newline in the
+pasted text is Enter, a tab is Tab, and an editor auto-indents each pasted line. With it, the terminal
+wraps the paste in `ESC[200~` … `ESC[201~` and the binding delivers everything between as
+`Event.text` in one `Paste` event — newlines, tabs and Escapes included, nothing interpreted as a
+key, however many reads it took. `poll_event` waits for the closing marker; `peek_event` answers
+`None` while it has not come and keeps what has arrived. Bytes that are not UTF-8 arrive as U+FFFD.
+
+It is **off by default**, and `shutdown` turns it off again, so the shell a program returns to is
+never left receiving markers. termbox has no notion of it: the binding answers termbox's own parser
+hook (`TB_FUNC_EXTRACT_PRE`) from `termbox2.c`, and the search for the closing marker resumes where
+the previous read's stopped, so a long paste costs time in proportion to its length.
+
 ## What is not bound, and why
 
 | absent | why |
 |---|---|
 | `tb_printf`, `tb_printf_ex`, `tb_sendf` | Varargs, which sysl does not spell — and does not need to, since `f"…"` builds the string first. |
 | `tb_get_cell`, `tb_cell_buffer` | Handing out the cell struct. `tb_cell_buffer` is deprecated upstream, and `tb_get_cell` hands out a pointer into termbox's storage that the next call may free. `cluster_at` copies a cell's codepoints out instead. |
-| `tb_set_func` | A C function pointer, and deprecated upstream. |
+| `tb_set_func` | Deprecated upstream, and a hook into the parser's own buffer. The binding uses it itself, for bracketed paste, and does not hand it out: a program's own hook would replace that one. |
 | `tb_utf8_*` | `sysl.text` already decodes UTF-8, and two answers to one question is one too many. |
 
 ## The choices the package made for you
@@ -305,7 +330,7 @@ reason: it is a deliberate divergence from upstream, and it needs a macro of ter
 sysl test .
 ```
 
-22 tests, and **none of them needs a terminal** — they set `TERM` themselves so that a build runner
+49 tests, and **none of them needs a terminal** — they set `TERM` themselves so that a build runner
 with none does not report itself instead of the binding. What they cover:
 
 - the three compile-time options, each of which is invisible to the linker — and which now have to
@@ -322,6 +347,13 @@ with none does not report itself instead of the binding. What they cover:
 that. The cluster tests instead open a pseudo-terminal of a chosen size with `openpty` (declared in
 the test file only, so no consumer compiles it), draw on it, read cells back with `cluster_at` and
 read what `present` wrote from the master end.
+
+**Input is covered on the same pseudo-terminal**, written into the master end exactly where a terminal
+emulator writes it. The bracketed-paste tests feed the markers whole, split across writes (the opening
+marker, the closing marker, and a read boundary landing on the paste's Escape), around ordinary keys
+and arrow keys, holding Escapes and near misses of the closing marker, empty, twice in one write, not
+UTF-8, in `alt` mode, and a mebibyte in 512-byte writes with `peek_event` between; and they check the
+terminal is told on enable, on disable and at `shutdown`, and told nothing when it was never on.
 
 Two more things are checked by hand for the same reason — a package cannot carry a program, so nothing
 in this repository can be a *consumer* of it. Both were run when the `c/` layer was introduced: a

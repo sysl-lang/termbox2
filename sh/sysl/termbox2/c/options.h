@@ -60,4 +60,10 @@
 
 #include "termbox2.h"
 
+/* The event type `termbox2.c` reports for a bracketed paste. termbox's own
+ * types are 1 to 3 and nothing of termbox's is this number; it is here rather
+ * than in `termbox2.c` so that the `c const` block in `c.sysl` reads it from the
+ * same place it reads termbox's. */
+#define SYSL_TB_EVENT_PASTE 0x50
+
 #endif

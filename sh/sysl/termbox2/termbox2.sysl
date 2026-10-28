@@ -2,7 +2,7 @@ module sh.sysl.termbox2
 
 import sh.sysl.termbox2.c
 import sysl.buf.{Buf, buf}
-import sysl.text.{chars_of, cstring, from_cstring, str_builder}
+import sysl.text.{chars_of, cstring, from_cstring, from_utf8_lossy, str_builder}
 import sysl.unicode.graphemes_of
 
 // A full-screen terminal interface, bound to termbox2.
@@ -566,6 +566,9 @@ enum EventKind
     Resize
     // Only ever delivered with `InputMode.mouse` on.
     Mouse
+    // The reader pasted. `Event.text` is everything pasted, as one string. Only ever delivered after
+    // `enable_bracketed_paste`.
+    Paste
     UnknownEvent
 
     // Which kind a number termbox reported is. **One way only**, as `ErrorKind.of` is: an event
@@ -574,12 +577,14 @@ enum EventKind
         c.EVENT_KEY    -> Keyboard
         c.EVENT_RESIZE -> Resize
         c.EVENT_MOUSE  -> Mouse
+        c.EVENT_PASTE  -> Paste
         _              -> UnknownEvent
 
     name(self) -> string = self match
         Keyboard     -> "Keyboard"
         Resize       -> "Resize"
         Mouse        -> "Mouse"
+        Paste        -> "Paste"
         UnknownEvent -> "UnknownEvent"
 end EventKind
 
@@ -593,9 +598,10 @@ impl Display for EventKind
 //   - `Keyboard` -- `key` or `ch`, and the modifiers.
 //   - `Resize` -- `w` and `h`.
 //   - `Mouse` -- `key`, which is one of the `Mouse*` variants, and `x` and `y`.
+//   - `Paste` -- `text`.
 //
-// The rest are zero, and reading one of them is reading a number that means nothing rather than
-// getting an error.
+// The rest are zero, or empty, and reading one of them is reading a value that means nothing rather
+// than getting an error.
 struct Event
     kind: EventKind
 
@@ -621,6 +627,10 @@ struct Event
     // Where the mouse was, on a `Mouse`.
     x: int
     y: int
+
+    // What was pasted, on a `Paste`: every byte between the terminal's markers, newlines, tabs and
+    // Escapes included, with nothing interpreted as a key. Bytes that are not UTF-8 arrive as U+FFFD.
+    text: string
 
     // **`ctrl` and `shift` are only ever set on the arrow keys**, and `alt` only in `InputMode.alt`.
     // A control key elsewhere arrives as a `Ctrl*` variant of `Key` rather than as a modifier on a
@@ -680,8 +690,38 @@ peek_event(timeout_ms: int) -> Result[Option[Event], Error]
         Err(Error(rv))
 end peek_event
 
-private event_of(t: int, m: int, k: int, ch: u32, w: int, h: int, x: int, y: int) -> Event =
-    Event(EventKind.of(t), Key.of(k), ch, k, u8(m), w, h, x, y)
+private event_of(t: int, m: int, k: int, ch: u32, w: int, h: int, x: int, y: int) -> Event
+    val kind = EventKind.of(t)
+
+    Event(kind, Key.of(k), ch, k, u8(m), w, h, x, y, if kind == Paste then pasted() else "")
+end event_of
+
+// The last paste's text, copied out of the shim's buffer before the next event overwrites it.
+private pasted() -> string
+    var n: usize = 0
+    val p = c.paste_text(&n)
+
+    from_utf8_lossy(p[0..<n])
+end pasted
+
+// Ask the terminal to bracket what the reader pastes, so that a paste arrives as one `Paste` event
+// rather than as a keystroke per character.
+//
+// **Without it, a paste is typing.** Every character arrives as a `Keyboard` event, so a newline in
+// the pasted text is Enter and a tab is Tab: an editor auto-indents each pasted line, and a program
+// that acts on a key runs the action. With it, the terminal sends `ESC[200~` before the text and
+// `ESC[201~` after, and this binding delivers what is between as `Event.text`, whole, however many
+// reads it took to arrive -- `poll_event` waits for the closing marker, and `peek_event` answers
+// `None` while it has not come and keeps what has.
+//
+// **Off until asked for**, because a terminal that does not understand the request ignores it and
+// the program is no worse off, but one that does changes what every paste looks like. `shutdown`
+// turns it off again, so a terminal is never left bracketing pastes into the shell; so does
+// `disable_bracketed_paste`. Answers `NotInit` before `init`.
+enable_bracketed_paste() -> Result[unit, Error] = ok(c.enable_bracketed_paste())
+
+// Stop bracketing pastes; a paste is typing again.
+disable_bracketed_paste() -> Result[unit, Error] = ok(c.disable_bracketed_paste())
 
 // The two descriptors termbox reads, for a program running its own `select` or `poll` loop over
 // several sources at once. Either becoming readable means `poll_event` will answer without blocking.

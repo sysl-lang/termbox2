@@ -127,6 +127,8 @@ c const
     EVENT_KEY:    int = "TB_EVENT_KEY"
     EVENT_RESIZE: int = "TB_EVENT_RESIZE"
     EVENT_MOUSE:  int = "TB_EVENT_MOUSE"
+    // Not termbox's: the type `termbox2.c` reports a bracketed paste with (`options.h`).
+    EVENT_PASTE:  int = "SYSL_TB_EVENT_PASTE"
 
 c const
     MOD_ALT:    u8 = "TB_MOD_ALT"
@@ -214,7 +216,8 @@ extern "tb_init" init() -> int
 extern "tb_init_file" init_file(path: *u8) -> int
 extern "tb_init_fd" init_fd(fd: int) -> int
 extern "tb_init_rwfd" init_rwfd(rfd: int, wfd: int) -> int
-extern "tb_shutdown" shutdown() -> int
+// `shutdown` is the shim, which turns bracketed paste off before termbox restores the terminal.
+extern "sysl_tb_shutdown" shutdown() -> int
 
 // ## The screen
 
@@ -256,11 +259,16 @@ extern "tb_version" version() -> *u8
 extern "tb_iswprint" iswprint(ch: u32) -> int
 extern "tb_wcwidth" wcwidth(ch: u32) -> int
 
-// ## The three shims
+// ## The shims
 //
-// `termbox2.c` says why each of these cannot be an `extern` on termbox's own symbol: two are about a
-// layout only the header knows, and `send` is a deliberate divergence from upstream that needs a
-// macro of termbox's own.
+// `termbox2.c` says why each of these cannot be an `extern` on termbox's own symbol: the event and
+// cell calls are about a layout only the header knows, `send` is a deliberate divergence from
+// upstream that needs a macro of termbox's own, and bracketed paste is a parser hook termbox calls
+// back into, with state of its own.
+
+extern "sysl_tb_enable_bracketed_paste" enable_bracketed_paste() -> int
+extern "sysl_tb_disable_bracketed_paste" disable_bracketed_paste() -> int
+extern "sysl_tb_paste_text" paste_text(n: *usize) -> *u8
 
 extern "sysl_tb_poll_event" poll_event(t: *int, m: *int, k: *int, ch: *u32, w: *int, h: *int,
                                        x: *int, y: *int) -> int
