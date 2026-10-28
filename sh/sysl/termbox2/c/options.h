@@ -31,13 +31,14 @@
  * the package; a consumer who finds a terminal buffer larger than they wanted
  * still has a working program.
  *
- * `TB_OPT_EGC` is deliberately NOT set. It would add three fields to every cell
- * and enable `tb_set_cell_ex` and `tb_extend_cell`, which take an array of
- * codepoints making up one grapheme cluster. sysl's text layer does not compute
- * grapheme clusters -- `sysl.text` is explicit that clustering is ASCII-only for
- * now -- so the binding would be offering a parameter its own standard library
- * cannot produce. Wide characters do not need it: termbox handles a `wcwidth==2`
- * codepoint by zeroing the cell after it, with EGC off.
+ * `TB_OPT_EGC` is set. It adds three fields to every cell (a pointer to the
+ * cluster's codepoints and two counts) and enables `tb_set_cell_ex` and
+ * `tb_extend_cell`, which take the codepoints of one grapheme cluster. Without
+ * it a cell holds one codepoint, so a base letter and a combining mark cannot
+ * share a cell and `e` followed by U+0301 draws as `e`. sysl's text layer
+ * computes clusters (`sysl.unicode.graphemes_of`), which is what the binding's
+ * `set_cluster` splits a string with. A cell without a cluster still uses `ch`
+ * alone, so ordinary text costs only the larger cell.
  *
  * `TB_OPT_LIBC_WCHAR` is also not set, and that one is load-bearing. Left unset,
  * termbox measures display width with its own Unicode tables. Set, it uses libc's
@@ -55,6 +56,7 @@
 #define SYSL_TB_OPTIONS_H
 
 #define TB_OPT_ATTR_W 64
+#define TB_OPT_EGC
 
 #include "termbox2.h"
 

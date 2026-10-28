@@ -82,6 +82,34 @@ int sysl_tb_peek_event(int timeout_ms, int *type, int *mod, int *key,
 }
 
 /* ===================================================================== *
+ * Reading a cell back
+ * ===================================================================== */
+
+/* The codepoints of one cell, as many as fit in `out`, with the true count in
+ * `*out_n`. **`struct tb_cell` is a layout only this header knows**, and with
+ * `TB_OPT_EGC` a cell holds either one codepoint (`ch`, `nech == 0`) or a
+ * cluster (`ech`, `nech` of them), so the sysl side is handed the codepoints
+ * rather than the struct. A caller whose buffer was too small sees
+ * `*out_n > cap` and knows how much more to ask for.
+ */
+int sysl_tb_cell_codepoints(int x, int y, int back, uint32_t *out, size_t cap,
+    size_t *out_n) {
+    struct tb_cell *cell;
+    int rv = tb_get_cell(x, y, back, &cell);
+
+    if (rv != TB_OK) return rv;
+
+    size_t n = cell->nech > 0 ? cell->nech : 1;
+
+    for (size_t i = 0; i < n && i < cap; i++)
+        out[i] = cell->nech > 0 ? cell->ech[i] : cell->ch;
+
+    *out_n = n;
+
+    return TB_OK;
+}
+
+/* ===================================================================== *
  * Printing and raw output
  * ===================================================================== */
 

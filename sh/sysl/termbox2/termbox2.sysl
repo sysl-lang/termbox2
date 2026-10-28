@@ -1,7 +1,9 @@
 module sh.sysl.termbox2
 
 import sh.sysl.termbox2.c
-import sysl.text.{cstring, from_cstring}
+import sysl.buf.{Buf, buf}
+import sysl.text.{chars_of, cstring, from_cstring, str_builder}
+import sysl.unicode.graphemes_of
 
 // A full-screen terminal interface, bound to termbox2.
 //
@@ -342,6 +344,63 @@ hide_cursor() -> Result[unit, Error] = ok(c.hide_cursor())
 set_cell(x: int, y: int, ch: u32, fg: u64, bg: u64) -> Result[unit, Error] =
     ok(c.set_cell(x, y, ch, fg, bg))
 
+// One grapheme cluster -- a base character with its combining marks, an emoji sequence, a flag -- in
+// one cell, which is what `set_cell` cannot do: it takes a single codepoint, so `e` followed by U+0301
+// would draw as `e` alone.
+//
+// **`cluster` must be exactly one grapheme cluster**, as `sysl.unicode.graphemes_of` reckons it. An
+// empty string and a string of two or more clusters are both refused with `Failed`, and nothing is
+// written: a cell holds one cluster, and silently keeping the first would hide a caller's mistake. A
+// cluster two columns wide (a wide base character, an emoji sequence) takes the cell after it as
+// well, exactly as a wide `set_cell` does, so the next thing a caller sets goes two columns along.
+// `sysl.text.grapheme_columns` says how wide a cluster will be.
+set_cluster(x: int, y: int, cluster: string, fg: u64, bg: u64) -> Result[unit, Error]
+    var g = graphemes_of(cluster.bytes)
+
+    val first = g.next() match
+        Some(v) -> v
+        None -> return Err(Error(c.ERR))
+
+    if g.next().is_some() then return Err(Error(c.ERR))
+
+    var cps: Buf[u32] = buf()
+
+    for ch in chars_of(first) do cps.push(u32(ch))
+
+    ok(c.set_cell_ex(x, y, &cps[0], cps.len(), fg, bg))
+end set_cluster
+
+// Append one codepoint to the cell at `x`, `y`, making (or growing) a cluster -- the way to put a
+// combining mark on whatever the cell already holds. The cell must be in bounds; an out-of-bounds
+// cell is `OutOfBounds`.
+extend_cell(x: int, y: int, ch: u32) -> Result[unit, Error] = ok(c.extend_cell(x, y, ch))
+
+// What a cell of the back buffer holds, as a string: its one codepoint, or the whole cluster. A wide
+// character's trailing cell reads as the empty codepoint U+0000.
+cluster_at(x: int, y: int) -> Result[string, Error]
+    var n: usize = 0
+    var one: u32 = 0
+
+    var rv = c.cell_codepoints(x, y, 1, &one, 1, &n)
+
+    if rv < 0 then return Err(Error(rv))
+
+    var cps: Buf[u32] = buf()
+
+    cps.reserve(n)
+    cps.set_len(n)
+
+    rv = c.cell_codepoints(x, y, 1, &cps[0], n, &n)
+
+    if rv < 0 then return Err(Error(rv))
+
+    var out = str_builder()
+
+    for cp in cps.view() do out.push_char(char(cp))
+
+    Ok(out.finish())
+end cluster_at
+
 // A string, left to right from `x`, in one pair of attributes. Answers how many columns it took.
 //
 // **The width answered is columns rather than bytes or codepoints**, so a line of CJK measures twice
@@ -659,9 +718,8 @@ attr_width() -> int = c.attr_width()
 // least 32.
 has_truecolor() -> bool = c.has_truecolor() != 0
 
-// Whether this build has grapheme-cluster cells. **False, deliberately** -- the package does not set
-// `TB_OPT_EGC`, so `tb_set_cell_ex` and `tb_extend_cell` are absent and are not bound.
-// `c/options.h` says why.
+// Whether this build has grapheme-cluster cells. True: the package sets `TB_OPT_EGC`, which is what
+// `set_cluster`, `extend_cell` and `cluster_at` rest on. `c/options.h` says why.
 has_egc() -> bool = c.has_egc() != 0
 
 // How many columns a codepoint occupies: 2 for most CJK and much emoji, 0 for a combining mark, 1 for

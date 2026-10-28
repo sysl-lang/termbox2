@@ -42,12 +42,12 @@ Name it in your project's `sysl.hocon` and `sysl build` fetches it:
 
 ```hocon
 dependencies {
-  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.2.1" }
+  termbox2 { git = "github.com/sysl-lang/termbox2", version = "0.3.0" }
 }
 ```
 
 The coordinate is an identity rather than a URL, so it carries no `https://`, and `version` is the
-tag `v0.2.1` here.
+tag `v0.3.0` here.
 
 Or point at it directly, which needs no fetching and is what this repository's own tests do. Either a
 built artifact or the source tree works, and they are the same road:
@@ -125,6 +125,9 @@ clear() / set_clear_attrs(fg, bg) / present() / invalidate()
 set_cursor(x, y) / hide_cursor()
 
 set_cell(x, y, ch, fg, bg)
+set_cluster(x, y, cluster, fg, bg)      // one grapheme cluster in one cell
+extend_cell(x, y, ch)                   // append a codepoint (a combining mark) to a cell
+cluster_at(x, y) -> string              // what a back-buffer cell holds
 print_at(x, y, fg, bg, s) -> usize      // columns taken
 send(bytes)                             // raw, around the cell buffer
 
@@ -188,8 +191,7 @@ and not termbox's.
 | absent | why |
 |---|---|
 | `tb_printf`, `tb_printf_ex`, `tb_sendf` | Varargs, which sysl does not spell — and does not need to, since `f"…"` builds the string first. |
-| `tb_set_cell_ex`, `tb_extend_cell` | Grapheme clusters, which need `TB_OPT_EGC`. The package does not set it; see below. |
-| `tb_get_cell`, `tb_cell_buffer` | Reading the cell grid back. `tb_cell_buffer` is deprecated upstream, and `tb_get_cell` hands out a pointer into termbox's storage that the next call may free. |
+| `tb_get_cell`, `tb_cell_buffer` | Handing out the cell struct. `tb_cell_buffer` is deprecated upstream, and `tb_get_cell` hands out a pointer into termbox's storage that the next call may free. `cluster_at` copies a cell's codepoints out instead. |
 | `tb_set_func` | A C function pointer, and deprecated upstream. |
 | `tb_utf8_*` | `sysl.text` already decodes UTF-8, and two answers to one question is one too many. |
 
@@ -203,10 +205,11 @@ decision rather than a default left alone.
   above the first eight, and it costs sixteen bytes per cell against the default of 16 bits. A
   consumer who finds a colour missing has no recourse; one who finds a buffer larger than they wanted
   still has a working program.
-- **`TB_OPT_EGC` is off.** It would enable `tb_set_cell_ex` and `tb_extend_cell`, which take an array
-  of codepoints making up one grapheme cluster — and `sysl.text` does not compute grapheme clusters
-  yet, so the binding would be offering a parameter its own standard library cannot produce. Wide
-  characters do not need it: termbox handles a two-column codepoint by zeroing the cell after it.
+- **`TB_OPT_EGC` is on.** A cell can hold a base character with its combining marks, an emoji
+  sequence or a flag, which `tb_set_cell_ex` and `tb_extend_cell` provide and `set_cluster` and
+  `extend_cell` bind. `set_cluster` takes a string that is exactly one grapheme cluster (by
+  `sysl.unicode.graphemes_of`) and refuses an empty string or several clusters. It costs three
+  fields per cell; a cell without a cluster still uses its one codepoint.
 - **`TB_OPT_LIBC_WCHAR` is off**, and this one is load-bearing. Left off, termbox measures display
   width with its own Unicode tables. Set, it would use libc's `wcwidth(3)`, which answers -1 for
   every non-ASCII codepoint until the program has called `setlocale(3)` with a UTF-8 locale — and no
@@ -314,14 +317,11 @@ with none does not report itself instead of the binding. What they cover:
 - the whole lifecycle against an ordinary file, including that `send`'s bytes come out the far end
   with termbox's own escape sequences around them.
 
-**What they cannot cover is drawing**, and the reason is worth stating rather than hiding. termbox
-asks the terminal for its size with an `ioctl`, and a descriptor that is not a terminal has none to
-give — so `init` against a file leaves a screen of no width on which every cell is out of bounds.
-That is the honest state of a program run under a pipe, and the tests pin exactly it. Covering
-`set_cell` and `present` for real would need a pseudo-terminal, which needs `posix_openpt`,
-`TIOCSWINSZ` and a `struct winsize` — macros and a layout, so more C, and **C in this package is C
-every consumer compiles.** Shipping test scaffolding to every program that draws a menu was judged
-not worth it.
+**Drawing is covered on a pseudo-terminal.** termbox asks the terminal for its size with an
+`ioctl`, so against an ordinary file every cell is out of bounds, and the lifecycle tests pin exactly
+that. The cluster tests instead open a pseudo-terminal of a chosen size with `openpty` (declared in
+the test file only, so no consumer compiles it), draw on it, read cells back with `cluster_at` and
+read what `present` wrote from the master end.
 
 Two more things are checked by hand for the same reason — a package cannot carry a program, so nothing
 in this repository can be a *consumer* of it. Both were run when the `c/` layer was introduced: a

@@ -232,6 +232,11 @@ extern "tb_hide_cursor" hide_cursor() -> int
 // mismatch and a silent one.
 extern "tb_set_cell" set_cell(x: int, y: int, ch: u32, fg: u64, bg: u64) -> int
 
+// The grapheme-cluster pair, which exist because `options.h` sets `TB_OPT_EGC`. `ch` is `nch`
+// codepoints making one cluster; `nch` is a `size_t`.
+extern "tb_set_cell_ex" set_cell_ex(x: int, y: int, ch: *u32, nch: usize, fg: u64, bg: u64) -> int
+extern "tb_extend_cell" extend_cell(x: int, y: int, ch: u32) -> int
+
 // ## Modes
 
 // One entry point sets and reports, told apart by being handed `INPUT_CURRENT`. Both answer the mode
@@ -261,6 +266,9 @@ extern "sysl_tb_poll_event" poll_event(t: *int, m: *int, k: *int, ch: *u32, w: *
                                        x: *int, y: *int) -> int
 extern "sysl_tb_peek_event" peek_event(timeout_ms: int, t: *int, m: *int, k: *int, ch: *u32,
                                        w: *int, h: *int, x: *int, y: *int) -> int
+
+extern "sysl_tb_cell_codepoints" cell_codepoints(x: int, y: int, back: int, out: *u32, cap: usize,
+                                                 out_n: *usize) -> int
 
 extern "sysl_tb_send" send(buf: *u8, n: usize) -> int
 

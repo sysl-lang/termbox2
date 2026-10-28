@@ -3,7 +3,7 @@ module sh.sysl.termbox2
 
 import sysl.buf.{Buf, buf}
 import sysl.fs.{make_temp_dir, read_text, remove_dir_all, write_text}
-import sysl.text.Search
+import sysl.text.{Search, from_utf8_lossy, grapheme_columns}
 
 // What this binding claims, run by `sysl test .`.
 //
@@ -99,13 +99,13 @@ the_attribute_width_the_header_was_built_with_is_the_one_this_side_assumes() =
     assert(INVISIBLE > 0xffffffffu64, "a 64-bit-only attribute is above the 32-bit ones")
     assert(has_truecolor(), "truecolor follows from an attribute width of at least 32")
 
-// The other two options, both deliberate and both stated in `c/options.h`.
+// The other options, stated in `c/options.h`.
 //
-// `has_egc` being false is what makes `tb_set_cell_ex` and `tb_extend_cell` absent from this binding
-// rather than merely unbound -- a reader who goes looking for them should find this.
+// `has_egc` being true is what makes `tb_set_cell_ex` and `tb_extend_cell` present, and `set_cluster`
+// rests on them.
 @test
-grapheme_clusters_are_off_and_the_binding_says_so() =
-    assert(!has_egc(), "TB_OPT_EGC is not set, so a cell holds one codepoint")
+grapheme_clusters_are_on_and_the_binding_says_so() =
+    assert(has_egc(), "TB_OPT_EGC is set, so a cell can hold a whole grapheme cluster")
 
 // **`TB_OPT_LIBC_WCHAR` is the option this catches, and it catches it by measuring a character.**
 // Unset -- as it is here -- termbox measures width with its own Unicode tables. Set, it would use
@@ -436,3 +436,196 @@ the_version_is_termboxs_own() =
     assert(version() != "", "termbox names its version")
     assert(version() != "unknown", "and it is not this binding's fallback")
     assert(version().contains("2."), "the vendored header is a termbox 2")
+
+// -- Grapheme clusters, on a pseudo-terminal -----------------------------------------------------------
+//
+// A cell can only be set on a screen with a size, and a size comes from `ioctl(TIOCGWINSZ)` on a real
+// terminal. `openpty` makes one with the size given, so these tests draw for real: the back buffer is
+// read back with `cluster_at`, and the bytes termbox writes are read from the master end.
+
+extern "openpty" c_openpty(master: *int, slave: *int, name: *u8, termp: *u8, winp: *u16) -> int
+extern "close" c_close(fd: int) -> int
+extern "read" c_read(fd: int, buf: *u8, n: usize) -> isize
+
+private struct Pty
+    master: int
+    slave: int
+end Pty
+
+// A termbox on a 4 row, 12 column pseudo-terminal.
+private screen() -> Pty
+    with_term()
+
+    var size: [4]u16 = [4, 12, 0, 0]
+    var master = 0
+    var slave = 0
+
+    assert_eq(c_openpty(&master, &slave, null, null, &size[0]), 0)
+
+    init_fd(slave).expect("termbox initializes on a pseudo-terminal")
+
+    Pty(master, slave)
+end screen
+
+// **The master end is closed before `shutdown`.** Restoring the terminal's modes waits for what has
+// been written to it to be read, and nothing here reads after the test body; with the master gone the
+// wait ends, and the restore may report a hung-up terminal, which is not what any test is about.
+private leave(p: Pty)
+    c_close(p.master)
+    shutdown()
+    c_close(p.slave)
+
+@test
+a_pseudo_terminal_gives_termbox_the_size_it_was_opened_with() =
+    val p = screen()
+
+    assert_eq(width().expect("there is a width"), 12)
+    assert_eq(height().expect("and a height"), 4)
+
+    leave(p)
+
+// A plain ASCII cell goes through `set_cell` and reads back as itself, so turning clusters on did not
+// change the ordinary path.
+@test
+an_ascii_cell_is_unchanged() =
+    val p = screen()
+
+    set_cell(0, 0, u32('a'), RED, DEFAULT).expect("an ordinary cell is set")
+
+    assert_eq(cluster_at(0, 0).expect("it reads back"), "a")
+
+    leave(p)
+
+// The case that started this: a base letter and a combining acute in one cell.
+@test
+a_base_and_a_combining_mark_share_one_cell() =
+    val p = screen()
+
+    set_cluster(1, 0, "e\u{301}", DEFAULT, DEFAULT).expect("a cluster is set")
+
+    assert_eq(cluster_at(1, 0).expect("it reads back"), "e\u{301}")
+    assert_eq(cluster_at(2, 0).expect("and the next cell is untouched"), " ")
+
+    leave(p)
+
+// A single-codepoint cluster takes the same path as `set_cell`.
+@test
+a_one_codepoint_cluster_is_an_ordinary_cell() =
+    val p = screen()
+
+    set_cluster(0, 1, "z", DEFAULT, DEFAULT).expect("set")
+
+    assert_eq(cluster_at(0, 1).expect("read"), "z")
+
+    leave(p)
+
+// Setting a plain codepoint over a cluster replaces it, rather than leaving the old marks behind.
+@test
+a_plain_set_over_a_cluster_drops_the_marks() =
+    val p = screen()
+
+    set_cluster(0, 0, "e\u{301}\u{323}", DEFAULT, DEFAULT).expect("a three codepoint cluster")
+    assert_eq(cluster_at(0, 0).expect("read"), "e\u{301}\u{323}")
+
+    set_cell(0, 0, u32('x'), DEFAULT, DEFAULT).expect("overwritten")
+    assert_eq(cluster_at(0, 0).expect("read"), "x")
+
+    leave(p)
+
+// `extend_cell` appends to what a cell holds, one codepoint at a time.
+@test
+extending_a_cell_appends_codepoints() =
+    val p = screen()
+
+    set_cell(3, 2, u32('a'), DEFAULT, DEFAULT).expect("a base")
+    extend_cell(3, 2, 0x301).expect("first mark")
+    assert_eq(cluster_at(3, 2).expect("read"), "a\u{301}")
+
+    extend_cell(3, 2, 0x323).expect("second mark")
+    assert_eq(cluster_at(3, 2).expect("read"), "a\u{301}\u{323}")
+
+    leave(p)
+
+// A cluster wider than one cell: a family emoji, seven codepoints, two columns wide and one cell.
+@test
+an_emoji_sequence_is_one_cell_of_many_codepoints() =
+    val p = screen()
+    val family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}"
+
+    set_cluster(0, 0, family, DEFAULT, DEFAULT).expect("a ZWJ sequence is one cluster")
+
+    assert_eq(cluster_at(0, 0).expect("read"), family)
+    assert_eq(grapheme_columns(family.bytes), 2)
+
+    leave(p)
+
+// A wide base with a mark, and a flag: other multi-codepoint shapes.
+@test
+a_wide_base_with_a_mark_and_a_flag_each_fit_a_cell() =
+    val p = screen()
+
+    set_cluster(0, 0, "\u{4e16}\u{301}", DEFAULT, DEFAULT).expect("wide base plus mark")
+    assert_eq(cluster_at(0, 0).expect("read"), "\u{4e16}\u{301}")
+
+    set_cluster(4, 0, "\u{1f1e8}\u{1f1e6}", DEFAULT, DEFAULT).expect("a flag")
+    assert_eq(cluster_at(4, 0).expect("read"), "\u{1f1e8}\u{1f1e6}")
+
+    leave(p)
+
+// What termbox writes for a cluster: all its codepoints, in order, to the terminal.
+@test
+presenting_a_cluster_writes_all_its_codepoints() =
+    val p = screen()
+
+    set_cluster(0, 0, "e\u{301}", DEFAULT, DEFAULT).expect("a cluster")
+    present().expect("presented")
+
+    var raw: [1024]u8 = [0; 1024]
+    var got = ""
+
+    loop
+        val n = c_read(p.master, &raw[0], 1024)
+
+        if n <= 0 then break
+
+        got = got + from_utf8_lossy(raw[..<usize(n)])
+
+        if got.contains("e\u{301}") then break
+
+    assert(got.contains("e\u{301}"), "the base and its mark reach the terminal together")
+
+    leave(p)
+
+// -- Cluster error paths --------------------------------------------------------------------------------
+
+// A cell holds one cluster, so an empty string and a string of several clusters are refused, and the
+// refusal writes nothing.
+@test
+set_cluster_refuses_an_empty_string_and_more_than_one_cluster() =
+    val p = screen()
+
+    set_cell(0, 0, u32('k'), DEFAULT, DEFAULT).expect("something to protect")
+
+    assert_eq(set_cluster(0, 0, "", DEFAULT, DEFAULT).unwrap_err().kind(), Failed)
+    assert_eq(set_cluster(0, 0, "ab", DEFAULT, DEFAULT).unwrap_err().kind(), Failed)
+    assert_eq(set_cluster(0, 0, "e\u{301}x", DEFAULT, DEFAULT).unwrap_err().kind(), Failed)
+
+    assert_eq(cluster_at(0, 0).expect("read"), "k")
+
+    leave(p)
+
+@test
+the_cluster_calls_report_out_of_bounds_and_not_init() =
+    assert_eq(set_cluster(0, 0, "e\u{301}", DEFAULT, DEFAULT).unwrap_err().kind(), NotInit)
+    assert_eq(extend_cell(0, 0, 0x301).unwrap_err().kind(), NotInit)
+    assert_eq(cluster_at(0, 0).unwrap_err().kind(), NotInit)
+
+    val p = screen()
+
+    assert_eq(set_cluster(12, 0, "e\u{301}", DEFAULT, DEFAULT).unwrap_err().kind(), OutOfBounds)
+    assert_eq(set_cluster(0, 4, "e\u{301}", DEFAULT, DEFAULT).unwrap_err().kind(), OutOfBounds)
+    assert_eq(set_cluster(-1, 0, "e\u{301}", DEFAULT, DEFAULT).unwrap_err().kind(), OutOfBounds)
+    assert_eq(extend_cell(12, 0, 0x301).unwrap_err().kind(), OutOfBounds)
+    assert_eq(cluster_at(0, 4).unwrap_err().kind(), OutOfBounds)
+
+    leave(p)
